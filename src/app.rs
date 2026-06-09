@@ -48,9 +48,13 @@ pub struct PanelData<T> {
     pub items: Vec<T>,
     pub error: Option<String>,
     pub loaded: bool,
+    /// Item selecionado (usado no painel de e-mails).
     pub cursor: usize,
-    /// Deslocamento de rolagem; ajustado na renderização (que conhece a altura).
+    /// Deslocamento de rolagem ao seguir o cursor; ajustado na renderização.
     pub offset: Cell<usize>,
+    /// Deslocamento de rolagem livre (painéis sem seleção: agenda/PRs).
+    /// Clampado ao máximo na renderização (que conhece a altura).
+    pub scroll: Cell<usize>,
 }
 
 impl<T> PanelData<T> {
@@ -61,7 +65,15 @@ impl<T> PanelData<T> {
             loaded: false,
             cursor: 0,
             offset: Cell::new(0),
+            scroll: Cell::new(0),
         }
+    }
+
+    /// Rola por `delta` linhas (limite inferior 0; o superior é aplicado na
+    /// renderização, que reescreve o valor já clampado).
+    fn scroll_by(&self, delta: isize) {
+        let v = (self.scroll.get() as isize + delta).max(0) as usize;
+        self.scroll.set(v);
     }
 
     /// Aplica o resultado de uma busca, preservando o cursor dentro dos limites.
@@ -146,27 +158,29 @@ impl App {
         }
     }
 
-    fn focused_mut_move(&mut self, delta: isize) {
+    /// Rola/move o painel focado. E-mail move a seleção; agenda/PRs rolam livre.
+    fn focused_scroll(&mut self, delta: isize) {
         match self.focus {
             Panel::Email => self.emails.move_cursor(delta),
-            Panel::Agenda => self.agenda.move_cursor(delta),
-            Panel::Pulls => self.pulls.move_cursor(delta),
+            Panel::Agenda => self.agenda.scroll_by(delta),
+            Panel::Pulls => self.pulls.scroll_by(delta),
         }
     }
 
     fn focused_to_first(&mut self) {
         match self.focus {
             Panel::Email => self.emails.to_first(),
-            Panel::Agenda => self.agenda.to_first(),
-            Panel::Pulls => self.pulls.to_first(),
+            Panel::Agenda => self.agenda.scroll.set(0),
+            Panel::Pulls => self.pulls.scroll.set(0),
         }
     }
 
     fn focused_to_last(&mut self) {
+        // Para listas roláveis, o valor grande é clampado ao máximo na render.
         match self.focus {
             Panel::Email => self.emails.to_last(),
-            Panel::Agenda => self.agenda.to_last(),
-            Panel::Pulls => self.pulls.to_last(),
+            Panel::Agenda => self.agenda.scroll.set(usize::MAX),
+            Panel::Pulls => self.pulls.scroll.set(usize::MAX),
         }
     }
 
@@ -216,8 +230,8 @@ impl App {
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::Tab => self.focus = self.focus.next(),
             KeyCode::BackTab => self.focus = self.focus.prev(),
-            KeyCode::Char('j') | KeyCode::Down => self.focused_mut_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.focused_mut_move(-1),
+            KeyCode::Char('j') | KeyCode::Down => self.focused_scroll(1),
+            KeyCode::Char('k') | KeyCode::Up => self.focused_scroll(-1),
             KeyCode::Char('g') | KeyCode::Home => self.focused_to_first(),
             KeyCode::Char('G') | KeyCode::End => self.focused_to_last(),
             KeyCode::Enter => self.open_detail(),
@@ -371,6 +385,19 @@ mod tests {
         app.update(Msg::EmailBody(Ok("corpo".into())));
         let d = app.detail.as_ref().unwrap();
         assert_eq!(d.body.as_ref().unwrap().as_ref().unwrap(), "corpo");
+    }
+
+    #[test]
+    fn agenda_scroll_clamps_at_zero_and_increments() {
+        let mut app = test_app();
+        app.focus = Panel::Agenda;
+        app.update(key(KeyCode::Char('k'))); // não passa de 0
+        assert_eq!(app.agenda.scroll.get(), 0);
+        app.update(key(KeyCode::Char('j')));
+        app.update(key(KeyCode::Char('j')));
+        assert_eq!(app.agenda.scroll.get(), 2);
+        app.update(key(KeyCode::Char('g')));
+        assert_eq!(app.agenda.scroll.get(), 0);
     }
 
     #[test]

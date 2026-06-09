@@ -7,8 +7,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui_bubbletea_theme::BubbleTheme;
 
+use crate::ansi;
 use crate::app::{App, Panel};
 use crate::clock;
+use crate::data::AgendaItem;
 
 /// Calcula o deslocamento de rolagem para manter o cursor visível.
 ///
@@ -32,7 +34,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header (relógio)
+            Constraint::Length(8), // header (relógio grande + data)
             Constraint::Min(0),    // corpo
             Constraint::Length(1), // footer (ajuda)
         ])
@@ -52,18 +54,32 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let time = clock::format_time(&app.now);
     let date = clock::format_date(&app.now);
 
-    let line = Line::from(vec![
-        Span::styled(time, theme.accent.add_modifier(Modifier::BOLD)),
-        theme.muted("   "),
-        theme.muted(date),
-    ]);
-
     let block = theme.block();
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(clock::BIG_HEIGHT as u16),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    // Relógio em "fonte" grande (arte ASCII), centralizado e em destaque.
+    let clock_style = theme.accent.add_modifier(Modifier::BOLD);
+    let big: Vec<Line> = clock::big_glyphs(&time)
+        .into_iter()
+        .map(|r| Line::from(Span::styled(r, clock_style)))
+        .collect();
     frame.render_widget(
-        Paragraph::new(line).alignment(Alignment::Center),
-        inner,
+        Paragraph::new(big).alignment(Alignment::Center),
+        rows[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(theme.muted(date))).alignment(Alignment::Center),
+        rows[1],
     );
 }
 
@@ -88,8 +104,9 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let p = &app.emails;
     let unread = p.items.iter().filter(|e| e.unread).count();
     let title = format!(" E-MAILS  {}/{} ", unread, p.items.len());
+    let focused = app.focus == Panel::Email;
 
-    let selected = (app.focus == Panel::Email).then_some(p.cursor);
+    let selected = focused.then_some(p.cursor);
     let lines: Vec<Line> = p
         .items
         .iter()
@@ -113,90 +130,131 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
         })
         .collect();
 
-    render_scroll_panel(frame, app, area, title, app.focus == Panel::Email, lines, p);
+    let inner = panel_inner(frame, theme, area, title, focused);
+    if render_empty_state(frame, app, inner, p) {
+        return;
+    }
+    // Segue o cursor (seleção).
+    let height = inner.height as usize;
+    let off = window(lines.len(), p.cursor, p.offset.get(), height);
+    p.offset.set(off);
+    render_lines(frame, theme, inner, lines, off);
 }
 
 fn render_agenda(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let p = &app.agenda;
     let title = format!(" AGENDA  {} ", p.items.len());
+    let focused = app.focus == Panel::Agenda;
 
-    let selected = (app.focus == Panel::Agenda).then_some(p.cursor);
-    let lines: Vec<Line> = p
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, a)| {
-            let when = if a.all_day() {
-                format!("{} dia", short_date(&a.date))
-            } else {
-                format!("{} {}", short_date(&a.date), a.time)
-            };
-            let line = Line::from(vec![
-                theme.accent(when),
-                theme.span(" "),
-                theme.span(clip(&a.title, 40)),
-                theme.muted(" "),
-                theme.muted(a.account.marker()),
-            ]);
-            highlight(line, theme, selected == Some(i))
-        })
-        .collect();
+    let lines = build_agenda_lines(&p.items, theme);
 
-    render_scroll_panel(frame, app, area, title, app.focus == Panel::Agenda, lines, p);
+    let inner = panel_inner(frame, theme, area, title, focused);
+    if render_empty_state(frame, app, inner, p) {
+        return;
+    }
+    render_scrolled(frame, theme, inner, lines, &p.scroll);
 }
 
 fn render_pulls(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let p = &app.pulls;
     let title = " PRs (ghpending) ".to_string();
+    let focused = app.focus == Panel::Pulls;
 
-    let selected = (app.focus == Panel::Pulls).then_some(p.cursor);
-    let lines: Vec<Line> = p
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, l)| highlight(Line::from(theme.span(l.as_str())), theme, selected == Some(i)))
-        .collect();
+    // Reaplica as cores ANSI que o ghpending emite.
+    let lines: Vec<Line> = p.items.iter().map(|l| ansi::to_line(l, theme.text)).collect();
 
-    render_scroll_panel(frame, app, area, title, app.focus == Panel::Pulls, lines, p);
+    let inner = panel_inner(frame, theme, area, title, focused);
+    if render_empty_state(frame, app, inner, p) {
+        return;
+    }
+    render_scrolled(frame, theme, inner, lines, &p.scroll);
 }
 
-/// Renderiza um painel com borda, título e rolagem; ou um estado vazio
-/// (spinner enquanto carrega, erro, ou "vazio").
-fn render_scroll_panel<T>(
-    frame: &mut Frame<'_>,
-    app: &App,
-    area: Rect,
-    title: String,
-    focused: bool,
-    lines: Vec<Line>,
-    p: &crate::app::PanelData<T>,
-) {
-    let theme = &app.theme;
+/// Monta as linhas da agenda agrupadas por data → hora → eventos:
+///
+/// ```text
+/// 09/06
+///    10:00
+///       - Evento
+///       - Evento 2
+/// ```
+fn build_agenda_lines(items: &[AgendaItem], theme: &BubbleTheme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut cur_date: Option<String> = None;
+    let mut cur_time: Option<String> = None;
+
+    for a in items {
+        if cur_date.as_deref() != Some(a.date.as_str()) {
+            cur_date = Some(a.date.clone());
+            cur_time = None;
+            lines.push(Line::from(Span::styled(
+                short_date(&a.date),
+                theme.accent.add_modifier(Modifier::BOLD),
+            )));
+        }
+        let time_label = if a.all_day() {
+            "dia inteiro".to_string()
+        } else {
+            a.time.clone()
+        };
+        if cur_time.as_deref() != Some(time_label.as_str()) {
+            cur_time = Some(time_label.clone());
+            lines.push(Line::from(vec![theme.muted("   "), theme.accent(time_label)]));
+        }
+        lines.push(Line::from(vec![
+            theme.muted("      - "),
+            theme.span(clip(&a.title, 46)),
+            theme.muted(" "),
+            theme.muted(a.account.marker()),
+        ]));
+    }
+    lines
+}
+
+/// Desenha a borda/título do painel e devolve a área interna.
+fn panel_inner(frame: &mut Frame<'_>, theme: &BubbleTheme, area: Rect, title: String, focused: bool) -> Rect {
     let block = theme.block_with_focus(focused).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    inner
+}
 
-    if lines.is_empty() {
-        if !p.loaded {
-            frame.render_widget(&app.spinner, inner);
-        } else if let Some(err) = &p.error {
-            frame.render_widget(
-                theme.paragraph(theme.error(format!("erro: {err}"))).wrap(Wrap { trim: true }),
-                inner,
-            );
-        } else {
-            frame.render_widget(theme.paragraph(theme.muted("(vazio)")), inner);
-        }
-        return;
+/// Renderiza o estado vazio do painel (spinner/erro/vazio). Devolve `true` se
+/// renderizou algo (ou seja, não há lista a mostrar).
+fn render_empty_state<T>(frame: &mut Frame<'_>, app: &App, inner: Rect, p: &crate::app::PanelData<T>) -> bool {
+    if !p.items.is_empty() {
+        return false;
     }
+    let theme = &app.theme;
+    if !p.loaded {
+        frame.render_widget(&app.spinner, inner);
+    } else if let Some(err) = &p.error {
+        frame.render_widget(
+            theme.paragraph(theme.error(format!("erro: {err}"))).wrap(Wrap { trim: true }),
+            inner,
+        );
+    } else {
+        frame.render_widget(theme.paragraph(theme.muted("(vazio)")), inner);
+    }
+    true
+}
 
+/// Renderiza `lines` a partir do deslocamento `off`.
+fn render_lines(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, lines: Vec<Line>, off: usize) {
     let height = inner.height as usize;
-    let off = window(lines.len(), p.cursor, p.offset.get(), height);
-    p.offset.set(off);
     let visible: Vec<Line> = lines.into_iter().skip(off).take(height).collect();
     frame.render_widget(theme.paragraph(Text::from(visible)), inner);
+}
+
+/// Rolagem livre (sem seleção): clampa o `scroll` ao máximo e reescreve.
+fn render_scrolled(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, lines: Vec<Line>, scroll: &std::cell::Cell<usize>) {
+    let height = inner.height as usize;
+    let max_off = lines.len().saturating_sub(height);
+    let off = scroll.get().min(max_off);
+    scroll.set(off);
+    render_lines(frame, theme, inner, lines, off);
 }
 
 fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -387,6 +445,54 @@ mod tests {
         assert!(out.contains("Reunião"));
         assert!(out.contains("corpo do email"));
         assert!(out.contains("voltar")); // ajuda muda no modo detalhe
+    }
+
+    #[test]
+    fn agenda_lines_group_by_date_then_time() {
+        let theme = BubbleTheme::default();
+        let mk = |date: &str, time: &str, title: &str, acc| AgendaItem {
+            account: acc,
+            date: date.into(),
+            time: time.into(),
+            title: title.into(),
+        };
+        let items = vec![
+            mk("2026-06-09", "", "Escritório", Account::Work),
+            mk("2026-06-09", "10:00", "Daily", Account::Work),
+            mk("2026-06-09", "10:00", "Outro", Account::Work),
+            mk("2026-06-10", "14:00", "Call", Account::Personal),
+        ];
+        let lines: Vec<String> = build_agenda_lines(&items, &theme)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "09/06",
+                "   dia inteiro",
+                "      - Escritório [W]",
+                "   10:00",
+                "      - Daily [W]",
+                "      - Outro [W]",
+                "10/06",
+                "   14:00",
+                "      - Call [P]",
+            ]
+        );
+    }
+
+    #[test]
+    fn pulls_panel_renders_ansi_colors() {
+        let mut app = test_app();
+        app.pulls.items = vec!["\x1b[36m\x1b[1mrepo/name\x1b[0m".into()];
+        app.pulls.loaded = true;
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let has_cyan = (0..30)
+            .any(|y| (0..60).any(|x| buf[(x, y)].fg == ratatui::style::Color::Cyan));
+        assert!(has_cyan, "o nome do repo deve ser renderizado em ciano");
     }
 
     #[test]

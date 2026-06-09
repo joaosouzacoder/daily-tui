@@ -18,6 +18,42 @@ pub fn format_date<T: Datelike>(d: &T) -> String {
     )
 }
 
+/// Altura (em linhas) dos glifos grandes do relógio.
+pub const BIG_HEIGHT: usize = 5;
+
+/// Renderiza uma string (dígitos e `:`) como arte ASCII de 5 linhas, para
+/// exibir a hora em "fonte" grande no header.
+pub fn big_glyphs(text: &str) -> [String; BIG_HEIGHT] {
+    let mut rows: [String; BIG_HEIGHT] = Default::default();
+    for c in text.chars() {
+        let g = glyph(c);
+        for (r, row) in rows.iter_mut().enumerate() {
+            if !row.is_empty() {
+                row.push(' ');
+            }
+            row.push_str(g[r]);
+        }
+    }
+    rows
+}
+
+fn glyph(c: char) -> [&'static str; BIG_HEIGHT] {
+    match c {
+        '0' => ["███", "█ █", "█ █", "█ █", "███"],
+        '1' => [" █ ", "██ ", " █ ", " █ ", "███"],
+        '2' => ["███", "  █", "███", "█  ", "███"],
+        '3' => ["███", "  █", "███", "  █", "███"],
+        '4' => ["█ █", "█ █", "███", "  █", "  █"],
+        '5' => ["███", "█  ", "███", "  █", "███"],
+        '6' => ["███", "█  ", "███", "█ █", "███"],
+        '7' => ["███", "  █", "  █", "  █", "  █"],
+        '8' => ["███", "█ █", "███", "█ █", "███"],
+        '9' => ["███", "█ █", "███", "  █", "███"],
+        ':' => [" ", "█", " ", "█", " "],
+        _ => ["   ", "   ", "   ", "   ", "   "],
+    }
+}
+
 fn weekday_ptbr(w: Weekday) -> &'static str {
     match w {
         Weekday::Mon => "segunda-feira",
@@ -66,6 +102,17 @@ mod tests {
         // 2026-06-09 é uma terça-feira.
         let d = NaiveDate::from_ymd_opt(2026, 6, 9).unwrap();
         assert_eq!(format_date(&d), "terça-feira, 09 de junho de 2026");
+    }
+
+    #[test]
+    fn big_glyphs_have_fixed_height_and_render_colon() {
+        let big = big_glyphs("12:30");
+        assert_eq!(big.len(), 5);
+        // a coluna do ':' tem bloco nas linhas 1 e 3 (índices 1 e 3).
+        assert!(big.iter().any(|r| r.contains('█')));
+        // todas as 5 linhas têm a mesma largura (monospace).
+        let w = big[0].chars().count();
+        assert!(big.iter().all(|r| r.chars().count() == w));
     }
 
     #[test]

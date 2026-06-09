@@ -40,4 +40,13 @@ impl Account {
             Account::Personal => "personal",
         }
     }
+
+    /// Título da calendar primária (igual ao e-mail da conta). Usado para
+    /// filtrar só a agenda do próprio João, sem salas nem colegas assinados.
+    pub const fn primary_calendar(self) -> &'static str {
+        match self {
+            Account::Work => "you-work@example.com",
+            Account::Personal => "you@example.com",
+        }
+    }
 }

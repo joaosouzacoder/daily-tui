@@ -71,9 +71,18 @@ pub fn fetch(account: Account) -> Result<Vec<AgendaItem>, String> {
     let start_arg = today.format("%Y-%m-%d").to_string();
     let end_arg = end.format("%Y-%m-%d").to_string();
 
+    // `--calendar` é opção global (antes do subcomando) e restringe à calendar
+    // primária da conta — exclui salas e calendars de colegas assinadas.
     let output = Command::new("gcalcli")
         .env("XDG_DATA_HOME", &data_home)
-        .args(["agenda", &start_arg, &end_arg, "--tsv"])
+        .args([
+            "--calendar",
+            account.primary_calendar(),
+            "agenda",
+            &start_arg,
+            &end_arg,
+            "--tsv",
+        ])
         .output()
         .map_err(|e| format!("falha ao executar gcalcli: {e}"))?;
 

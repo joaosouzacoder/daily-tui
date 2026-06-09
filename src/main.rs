@@ -1,5 +1,6 @@
 //! daily-tui — painel de informações do dia (e-mails, agenda, PRs, relógio).
 
+mod ansi;
 mod app;
 mod clock;
 mod data;
