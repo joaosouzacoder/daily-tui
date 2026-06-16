@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ratatui_tea::ProgramHandle;
 
-use crate::data::{agenda, email, pulls, Account};
+use crate::data::{agenda, email, jira, pulls, tasks, Account};
 use crate::msg::Msg;
 
 /// Quantos e-mails buscar por conta.
@@ -15,10 +15,16 @@ const EMAIL_LIMIT: u32 = 50;
 
 /// Comandos enviados do loop principal para o worker.
 pub enum WorkerCmd {
-    /// Recarrega e-mails, agenda e PRs.
+    /// Recarrega e-mails, agenda, PRs e tarefas.
     RefreshAll,
     /// Busca o corpo de um e-mail para o overlay de detalhe.
     ReadEmail { account: Account, id: String },
+    /// Escrita no Google Tasks; após executar, re-busca a lista.
+    TaskComplete(String),
+    TaskReopen(String),
+    TaskAdd(String),
+    TaskEdit { id: String, title: String },
+    TaskDelete(String),
     /// Encerra a thread.
     Quit,
 }
@@ -42,6 +48,13 @@ pub fn spawn(
                 Ok(WorkerCmd::ReadEmail { account, id }) => {
                     let _ = ui.send(Msg::EmailBody(email::fetch_body(account, &id)));
                 }
+                Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
+                Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),
+                Ok(WorkerCmd::TaskAdd(title)) => mutate_tasks(&ui, tasks::add(&title)),
+                Ok(WorkerCmd::TaskEdit { id, title }) => {
+                    mutate_tasks(&ui, tasks::edit(&id, &title))
+                }
+                Ok(WorkerCmd::TaskDelete(id)) => mutate_tasks(&ui, tasks::delete(&id)),
                 Ok(WorkerCmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -55,6 +68,15 @@ fn refresh_all(ui: &ProgramHandle<Msg>) {
     let _ = ui.send(Msg::EmailsLoaded(fetch_emails()));
     let _ = ui.send(Msg::AgendaLoaded(fetch_agenda()));
     let _ = ui.send(Msg::PullsLoaded(pulls::fetch()));
+    let _ = ui.send(Msg::JiraLoaded(jira::fetch()));
+    let _ = ui.send(Msg::TasksLoaded(tasks::fetch()));
+}
+
+/// Aplica uma escrita no Google Tasks e re-busca a lista. Se a escrita falhar,
+/// propaga o erro para o painel; senão, manda a lista atualizada.
+fn mutate_tasks(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
+    let loaded = result.and_then(|()| tasks::fetch());
+    let _ = ui.send(Msg::TasksLoaded(loaded));
 }
 
 /// Agrega e-mails das duas contas e ordena do mais recente para o mais antigo.

@@ -1,0 +1,46 @@
+# ortie — broker de tokens OAuth para o himalaya (e-mail via Gmail/Workspace).
+# Destino: ~/.config/ortie/config.toml
+#
+# Os tokens NÃO ficam neste arquivo: são guardados/lidos no keyring do sistema
+# via `secret-tool` (precisa de um secret-service rodando: gnome-keyring ou
+# kwallet). Este arquivo só descreve o client OAuth e os endpoints.
+#
+# O client-id/secret abaixo é o client PÚBLICO do Thunderbird, documentado pela
+# pimalaya. Funciona para qualquer @gmail.com sem tela de "app não verificado",
+# e para Google Workspace (a menos que o admin bloqueie apps OAuth de terceiros).
+# Por ser público, não é segredo — pode ficar versionado.
+
+[accounts.gmail-personal]
+default = true
+
+client-id = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com"
+client-secret.raw = "kSmqreRr0qwBWJgbf5Y-PjSU"
+
+endpoints.authorization = "https://accounts.google.com/o/oauth2/auth?access_type=offline&prompt=consent"
+endpoints.token = "https://www.googleapis.com/oauth2/v3/token"
+endpoints.redirection = "http://127.0.0.1:9999"
+
+scopes = ["https://mail.google.com/"]
+tls = "rustls-ring"
+pkce = true
+auto-refresh = true
+
+storage.read.command  = ["secret-tool", "lookup", "app", "ortie", "account", "gmail-personal"]
+storage.write.command = ["secret-tool", "store", "--label=ortie OAuth token (gmail-personal)", "app", "ortie", "account", "gmail-personal"]
+
+[accounts.gmail-work]
+
+client-id = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com"
+client-secret.raw = "kSmqreRr0qwBWJgbf5Y-PjSU"
+
+endpoints.authorization = "https://accounts.google.com/o/oauth2/auth?access_type=offline&prompt=consent"
+endpoints.token = "https://www.googleapis.com/oauth2/v3/token"
+endpoints.redirection = "http://127.0.0.1:9999"
+
+scopes = ["https://mail.google.com/"]
+tls = "rustls-ring"
+pkce = true
+auto-refresh = true
+
+storage.read.command  = ["secret-tool", "lookup", "app", "ortie", "account", "gmail-work"]
+storage.write.command = ["secret-tool", "store", "--label=ortie OAuth token (gmail-work)", "app", "ortie", "account", "gmail-work"]

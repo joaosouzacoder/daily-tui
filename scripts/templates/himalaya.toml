@@ -1,0 +1,105 @@
+# himalaya — contas de e-mail do daily-tui. Destino: ~/.config/himalaya/config.toml
+#
+# Os nomes das contas (`personal`, `work`) precisam bater com o que o daily-tui
+# espera em src/data/mod.rs (himalaya_name). A autenticação é OAuth2/XOAUTH2
+# delegada ao `ortie` (veja templates/ortie.toml) — por isso NÃO há senha aqui;
+# o token de acesso vem de `ortie token show`.
+#
+# Os placeholders __EMAIL_*__ / __NAME_*__ são substituídos por scripts/setup-auth.sh.
+# O client-id/secret é o client público do Thunderbird (não é segredo).
+
+[accounts.personal]
+default = true
+email = "__EMAIL_PERSONAL__"
+display-name = "__NAME_PERSONAL__"
+message.send.save-copy = false
+
+# Folder aliases do Gmail em inglês (conta pessoal @gmail.com).
+folder.aliases.inbox = "INBOX"
+folder.aliases.sent = "[Gmail]/Sent Mail"
+folder.aliases.drafts = "[Gmail]/Drafts"
+folder.aliases.trash = "[Gmail]/Trash"
+folder.aliases.spam = "[Gmail]/Spam"
+folder.aliases.all = "[Gmail]/All Mail"
+
+backend.type = "imap"
+backend.host = "imap.gmail.com"
+backend.port = 993
+backend.encryption.type = "tls"
+backend.login = "__EMAIL_PERSONAL__"
+backend.auth.type = "oauth2"
+backend.auth.method = "xoauth2"
+backend.auth.client-id = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com"
+backend.auth.client-secret.raw = "kSmqreRr0qwBWJgbf5Y-PjSU"
+backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
+backend.auth.scope = "https://mail.google.com/"
+backend.auth.pkce = true
+backend.auth.redirect-host = "127.0.0.1"
+backend.auth.redirect-port = 9999
+backend.auth.access-token.cmd = "ortie -a gmail-personal --quiet token show"
+
+message.send.backend.type = "smtp"
+message.send.backend.host = "smtp.gmail.com"
+message.send.backend.port = 465
+message.send.backend.encryption.type = "tls"
+message.send.backend.login = "__EMAIL_PERSONAL__"
+message.send.backend.auth.type = "oauth2"
+message.send.backend.auth.method = "xoauth2"
+message.send.backend.auth.client-id = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com"
+message.send.backend.auth.client-secret.raw = "kSmqreRr0qwBWJgbf5Y-PjSU"
+message.send.backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+message.send.backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
+message.send.backend.auth.scope = "https://mail.google.com/"
+message.send.backend.auth.pkce = true
+message.send.backend.auth.redirect-host = "127.0.0.1"
+message.send.backend.auth.redirect-port = 9999
+message.send.backend.auth.access-token.cmd = "ortie -a gmail-personal --quiet token show"
+
+[accounts.work]
+email = "__EMAIL_WORK__"
+display-name = "__NAME_WORK__"
+message.send.save-copy = false
+
+# Folder aliases do Workspace. AJUSTE para o idioma da sua caixa! Os nomes abaixo
+# são pt-BR; em inglês use "[Gmail]/Sent Mail", "[Gmail]/Drafts", etc.
+folder.aliases.inbox = "INBOX"
+folder.aliases.sent = "[Gmail]/E-mails enviados"
+folder.aliases.drafts = "[Gmail]/Rascunhos"
+folder.aliases.trash = "[Gmail]/Lixeira"
+folder.aliases.spam = "[Gmail]/Spam"
+folder.aliases.all = "[Gmail]/Todos os e-mails"
+
+backend.type = "imap"
+backend.host = "imap.gmail.com"
+backend.port = 993
+backend.encryption.type = "tls"
+backend.login = "__EMAIL_WORK__"
+backend.auth.type = "oauth2"
+backend.auth.method = "xoauth2"
+backend.auth.client-id = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com"
+backend.auth.client-secret.raw = "kSmqreRr0qwBWJgbf5Y-PjSU"
+backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
+backend.auth.scope = "https://mail.google.com/"
+backend.auth.pkce = true
+backend.auth.redirect-host = "127.0.0.1"
+backend.auth.redirect-port = 9999
+backend.auth.access-token.cmd = "ortie -a gmail-work --quiet token show"
+
+message.send.backend.type = "smtp"
+message.send.backend.host = "smtp.gmail.com"
+message.send.backend.port = 465
+message.send.backend.encryption.type = "tls"
+message.send.backend.login = "__EMAIL_WORK__"
+message.send.backend.auth.type = "oauth2"
+message.send.backend.auth.method = "xoauth2"
+message.send.backend.auth.client-id = "406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com"
+message.send.backend.auth.client-secret.raw = "kSmqreRr0qwBWJgbf5Y-PjSU"
+message.send.backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+message.send.backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
+message.send.backend.auth.scope = "https://mail.google.com/"
+message.send.backend.auth.pkce = true
+message.send.backend.auth.redirect-host = "127.0.0.1"
+message.send.backend.auth.redirect-port = 9999
+message.send.backend.auth.access-token.cmd = "ortie -a gmail-work --quiet token show"

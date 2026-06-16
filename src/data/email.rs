@@ -2,9 +2,21 @@
 
 use std::process::Command;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use super::Account;
+
+/// Aceita `null` no JSON tratando-o como o valor default do tipo.
+///
+/// O `#[serde(default)]` só cobre campo *ausente*; o himalaya às vezes
+/// emite o campo presente com valor `null` (ex.: `"subject":null`).
+fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::deserialize(de)?.unwrap_or_default())
+}
 
 /// Um e-mail (envelope) já normalizado para exibição.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,21 +38,21 @@ pub struct EmailItem {
 #[derive(Deserialize)]
 struct Envelope {
     id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     flags: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     subject: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     from: Addr,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     date: String,
 }
 
 #[derive(Deserialize, Default)]
 struct Addr {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     addr: String,
 }
 
@@ -159,6 +171,18 @@ mod tests {
     #[test]
     fn invalid_json_is_an_error() {
         assert!(parse_envelopes("not json", Account::Work).is_err());
+    }
+
+    #[test]
+    fn null_fields_fall_back_to_defaults() {
+        let json = r#"[{"id":"99","flags":null,"subject":null,"from":null,"date":null}]"#;
+        let items = parse_envelopes(json, Account::Work).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "99");
+        assert_eq!(items[0].subject, "");
+        assert_eq!(items[0].from, "");
+        assert_eq!(items[0].date, "");
+        assert!(items[0].unread, "sem flag Seen -> não lido");
     }
 
     #[test]

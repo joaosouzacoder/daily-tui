@@ -8,9 +8,10 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui_bubbletea_theme::BubbleTheme;
 
 use crate::ansi;
-use crate::app::{App, Panel};
+use crate::app::{App, InputKind, Panel, Prompt};
 use crate::clock;
-use crate::data::AgendaItem;
+use chrono::Datelike;
+use crate::data::{AgendaItem, TaskItem};
 
 /// Calcula o deslocamento de rolagem para manter o cursor visível.
 ///
@@ -46,6 +47,9 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
 
     if app.detail.is_some() {
         render_detail(app, frame, frame.area());
+    }
+    if app.prompt.is_some() {
+        render_prompt(app, frame, frame.area());
     }
 }
 
@@ -89,14 +93,25 @@ fn render_body(app: &App, frame: &mut Frame<'_>, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(cols[0]);
+
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+        ])
         .split(cols[1]);
 
-    render_emails(app, frame, cols[0]);
+    render_emails(app, frame, left[0]);
+    render_jira(app, frame, left[1]);
     render_agenda(app, frame, right[0]);
     render_pulls(app, frame, right[1]);
+    render_tasks(app, frame, right[2]);
 }
 
 fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -170,6 +185,99 @@ fn render_pulls(app: &App, frame: &mut Frame<'_>, area: Rect) {
         return;
     }
     render_scrolled(frame, theme, inner, lines, &p.scroll);
+}
+
+fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let p = &app.jira;
+    let title = " JIRA (jirapending) ".to_string();
+    let focused = app.focus == Panel::Jira;
+
+    // Reaplica as cores ANSI que o jirapending emite.
+    let lines: Vec<Line> = p.items.iter().map(|l| ansi::to_line(l, theme.text)).collect();
+
+    let inner = panel_inner(frame, theme, area, title, focused);
+    if render_empty_state(frame, app, inner, p) {
+        return;
+    }
+    render_scrolled(frame, theme, inner, lines, &p.scroll);
+}
+
+fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let p = &app.tasks;
+    let pending = p.items.iter().filter(|t| !t.completed).count();
+    let title = format!(" TAREFAS  {}/{} ", pending, p.items.len());
+    let focused = app.focus == Panel::Tasks;
+
+    let selected = focused.then_some(p.cursor);
+    let lines: Vec<Line> = p
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, t)| highlight(task_line(t, theme), theme, selected == Some(i)))
+        .collect();
+
+    let inner = panel_inner(frame, theme, area, title, focused);
+    if render_empty_state(frame, app, inner, p) {
+        return;
+    }
+    // Segue o cursor (seleção), igual ao painel de e-mails.
+    let height = inner.height as usize;
+    let off = window(lines.len(), p.cursor, p.offset.get(), height);
+    p.offset.set(off);
+    render_lines(frame, theme, inner, lines, off);
+}
+
+/// Linha de uma tarefa: checkbox + título (concluídas esmaecidas) + prazo.
+fn task_line(t: &TaskItem, theme: &BubbleTheme) -> Line<'static> {
+    let mut spans = if t.completed {
+        vec![theme.muted("[x] "), theme.muted(clip(&t.title, 40))]
+    } else {
+        vec![theme.span("[ ] "), theme.span(clip(&t.title, 40))]
+    };
+    if !t.due.is_empty() {
+        spans.push(theme.muted("  "));
+        spans.push(theme.accent(short_date(&t.due)));
+    }
+    Line::from(spans)
+}
+
+/// Overlay do prompt de tarefa (entrada de texto ou confirmação de exclusão).
+fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let Some(prompt) = &app.prompt else { return };
+
+    let (title, lines): (String, Vec<Line>) = match prompt {
+        Prompt::Input { kind, buffer } => {
+            let title = match kind {
+                InputKind::AddTask => " Nova tarefa ".to_string(),
+                InputKind::EditTask { .. } => " Editar tarefa ".to_string(),
+            };
+            let input = Line::from(vec![theme.span(buffer.clone()), theme.accent("█")]);
+            let help = Line::from(theme.muted("Enter: salvar · Esc: cancelar"));
+            (title, vec![input, Line::from(""), help])
+        }
+        Prompt::ConfirmDelete { title, .. } => (
+            " Apagar tarefa ".to_string(),
+            vec![
+                Line::from(vec![
+                    theme.muted("Apagar \""),
+                    theme.span(clip(title, 40)),
+                    theme.muted("\"?"),
+                ]),
+                Line::from(""),
+                Line::from(theme.muted("y: confirmar · n/Esc: cancelar")),
+            ],
+        ),
+    };
+
+    let popup = centered_rect(60, 24, area);
+    frame.render_widget(Clear, popup);
+    let block = theme.titled_modal_block(title);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(theme.paragraph(Text::from(lines)).wrap(Wrap { trim: true }), inner);
 }
 
 /// Monta as linhas da agenda agrupadas por data → hora → eventos:
@@ -266,6 +374,16 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
     let help = if app.detail.is_some() {
         theme.help_line([("j/k", "rolar"), ("Esc", "voltar")])
+    } else if app.prompt.is_some() {
+        theme.help_line([("Enter/y", "confirmar"), ("Esc/n", "cancelar")])
+    } else if app.focus == Panel::Tasks {
+        theme.help_line([
+            ("Espaço", "concluir"),
+            ("a", "nova"),
+            ("e", "editar"),
+            ("d", "apagar"),
+            ("Tab", "painel"),
+        ])
     } else {
         theme.help_line([
             ("Tab", "painel"),
@@ -344,7 +462,13 @@ fn clip(s: &str, max: usize) -> String {
 fn short_date(iso: &str) -> String {
     let parts: Vec<&str> = iso.split('-').collect();
     if parts.len() == 3 {
-        format!("{}/{}", parts[2], parts[1])
+        let day = parts[2];
+        let ddmm = format!("{}/{}", day, parts[1]);
+        // O dia pode vir com hora colada ("09 10:00+00:00"); usa só os 10 primeiros chars.
+        match chrono::NaiveDate::parse_from_str(&iso[..iso.len().min(10)], "%Y-%m-%d") {
+            Ok(d) => format!("{} - {}", ddmm, clock::weekday_short_ptbr(d.weekday())),
+            Err(_) => ddmm,
+        }
     } else {
         iso.to_string()
     }
@@ -469,17 +593,69 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "09/06",
+                "09/06 - Terça",
                 "   dia inteiro",
                 "      - Escritório [W]",
                 "   10:00",
                 "      - Daily [W]",
                 "      - Outro [W]",
-                "10/06",
+                "10/06 - Quarta",
                 "   14:00",
                 "      - Call [P]",
             ]
         );
+    }
+
+    #[test]
+    fn jira_panel_renders_title_and_ansi_colors() {
+        let mut app = test_app();
+        app.jira.items = vec!["\x1b[36;1mGOV (1)\x1b[0m".into(), "  \x1b[33mGOV-1\x1b[0m fix".into()];
+        app.jira.loaded = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = (0..30)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("JIRA"));
+        assert!(out.contains("GOV (1)"));
+        let has_cyan = (0..30)
+            .any(|y| (0..120).any(|x| buf[(x, y)].fg == ratatui::style::Color::Cyan));
+        assert!(has_cyan, "o cabeçalho do projeto deve ser renderizado em ciano");
+    }
+
+    #[test]
+    fn tasks_panel_renders_checkbox_and_titles() {
+        let mut app = test_app();
+        app.tasks.items = vec![
+            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new() },
+            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new() },
+        ];
+        app.tasks.loaded = true;
+        let out = render_to_string(&app, 120, 30);
+        assert!(out.contains("TAREFAS"));
+        assert!(out.contains("[ ] Comprar café"));
+        assert!(out.contains("[x] Já feito"));
+        assert!(out.contains("10/06")); // prazo formatado
+    }
+
+    #[test]
+    fn prompt_overlay_renders_input_buffer() {
+        let mut app = test_app();
+        app.prompt = Some(Prompt::Input { kind: InputKind::AddTask, buffer: "nova tarefa".into() });
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("Nova tarefa"));
+        assert!(out.contains("nova tarefa"));
+    }
+
+    #[test]
+    fn prompt_overlay_renders_delete_confirmation() {
+        let mut app = test_app();
+        app.prompt = Some(Prompt::ConfirmDelete { id: "1".into(), title: "apagar isto".into() });
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("Apagar tarefa"));
+        assert!(out.contains("apagar isto"));
     }
 
     #[test]
@@ -530,7 +706,7 @@ mod tests {
 
     #[test]
     fn short_date_formats_ddmm() {
-        assert_eq!(short_date("2026-06-12"), "12/06");
+        assert_eq!(short_date("2026-06-12"), "12/06 - Sexta");
         assert_eq!(short_date("invalid"), "invalid");
     }
 
