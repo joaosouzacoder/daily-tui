@@ -2,10 +2,13 @@
 
 pub mod agenda;
 pub mod email;
+pub mod jira;
 pub mod pulls;
+pub mod tasks;
 
 pub use agenda::AgendaItem;
 pub use email::EmailItem;
+pub use tasks::TaskItem;
 
 /// Conta de origem de um item (e-mail ou agenda).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +44,16 @@ impl Account {
         }
     }
 
-    /// Título da calendar primária (igual ao e-mail da conta). Usado para
-    /// filtrar só a agenda do próprio João, sem salas nem colegas assinados.
-    pub const fn primary_calendar(self) -> &'static str {
-        match self {
-            Account::Work => "you-work@example.com",
-            Account::Personal => "you@example.com",
-        }
+    /// E-mail da calendar primária da conta — usado no `--calendar` do gcalcli
+    /// para filtrar só a sua agenda (sem salas nem calendars de colegas).
+    ///
+    /// Lido das variáveis `DAILY_TUI_WORK_EMAIL` / `DAILY_TUI_PERSONAL_EMAIL`,
+    /// com placeholder de fallback, para não fixar e-mail no código.
+    pub fn primary_calendar(self) -> String {
+        let (var, default) = match self {
+            Account::Work => ("DAILY_TUI_WORK_EMAIL", "you-work@example.com"),
+            Account::Personal => ("DAILY_TUI_PERSONAL_EMAIL", "you@example.com"),
+        };
+        std::env::var(var).unwrap_or_else(|_| default.to_string())
     }
 }

@@ -10,7 +10,7 @@ use ratatui_bubbletea_components::{Spinner, SpinnerFrames};
 use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
-use crate::data::{AgendaItem, EmailItem};
+use crate::data::{AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
 use crate::ui;
 use crate::worker::WorkerCmd;
@@ -19,26 +19,33 @@ use crate::worker::WorkerCmd;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
     Email,
+    Jira,
     Agenda,
     Pulls,
+    Tasks,
 }
 
 impl Panel {
-    /// Próximo painel no ciclo (Tab).
+    /// Próximo painel no ciclo (Tab). Segue a leitura do layout: coluna esquerda
+    /// (E-mail → Jira), depois direita (Agenda → PRs → Tarefas).
     pub const fn next(self) -> Self {
         match self {
-            Panel::Email => Panel::Agenda,
+            Panel::Email => Panel::Jira,
+            Panel::Jira => Panel::Agenda,
             Panel::Agenda => Panel::Pulls,
-            Panel::Pulls => Panel::Email,
+            Panel::Pulls => Panel::Tasks,
+            Panel::Tasks => Panel::Email,
         }
     }
 
     /// Painel anterior no ciclo (Shift+Tab).
     pub const fn prev(self) -> Self {
         match self {
-            Panel::Email => Panel::Pulls,
-            Panel::Agenda => Panel::Email,
+            Panel::Email => Panel::Tasks,
+            Panel::Jira => Panel::Email,
+            Panel::Agenda => Panel::Jira,
             Panel::Pulls => Panel::Agenda,
+            Panel::Tasks => Panel::Pulls,
         }
     }
 }
@@ -123,6 +130,22 @@ pub struct Detail {
     pub scroll: usize,
 }
 
+/// O que um prompt de texto está coletando.
+pub enum InputKind {
+    /// Criar uma nova tarefa.
+    AddTask,
+    /// Editar o título da tarefa com este id.
+    EditTask { id: String },
+}
+
+/// Overlay modal de interação com tarefas (entrada de texto ou confirmação).
+pub enum Prompt {
+    /// Campo de texto (criar/editar tarefa).
+    Input { kind: InputKind, buffer: String },
+    /// Confirmação de exclusão da tarefa selecionada.
+    ConfirmDelete { id: String, title: String },
+}
+
 /// Modelo principal da aplicação.
 pub struct App {
     pub theme: BubbleTheme,
@@ -130,11 +153,14 @@ pub struct App {
     pub now: DateTime<Local>,
     pub focus: Panel,
     pub emails: PanelData<EmailItem>,
+    pub jira: PanelData<String>,
     pub agenda: PanelData<AgendaItem>,
     pub pulls: PanelData<String>,
+    pub tasks: PanelData<TaskItem>,
     pub spinner: Spinner,
     pub last_refresh: Option<DateTime<Local>>,
     pub detail: Option<Detail>,
+    pub prompt: Option<Prompt>,
     cmd_tx: Sender<WorkerCmd>,
 }
 
@@ -147,13 +173,16 @@ impl App {
             now: Local::now(),
             focus: Panel::Email,
             emails: PanelData::new(),
+            jira: PanelData::new(),
             agenda: PanelData::new(),
             pulls: PanelData::new(),
+            tasks: PanelData::new(),
             spinner: Spinner::new()
                 .frames(SpinnerFrames::DOTS)
                 .label("carregando"),
             last_refresh: None,
             detail: None,
+            prompt: None,
             cmd_tx,
         }
     }
@@ -162,16 +191,20 @@ impl App {
     fn focused_scroll(&mut self, delta: isize) {
         match self.focus {
             Panel::Email => self.emails.move_cursor(delta),
+            Panel::Jira => self.jira.scroll_by(delta),
             Panel::Agenda => self.agenda.scroll_by(delta),
             Panel::Pulls => self.pulls.scroll_by(delta),
+            Panel::Tasks => self.tasks.move_cursor(delta),
         }
     }
 
     fn focused_to_first(&mut self) {
         match self.focus {
             Panel::Email => self.emails.to_first(),
+            Panel::Jira => self.jira.scroll.set(0),
             Panel::Agenda => self.agenda.scroll.set(0),
             Panel::Pulls => self.pulls.scroll.set(0),
+            Panel::Tasks => self.tasks.to_first(),
         }
     }
 
@@ -179,8 +212,10 @@ impl App {
         // Para listas roláveis, o valor grande é clampado ao máximo na render.
         match self.focus {
             Panel::Email => self.emails.to_last(),
+            Panel::Jira => self.jira.scroll.set(usize::MAX),
             Panel::Agenda => self.agenda.scroll.set(usize::MAX),
             Panel::Pulls => self.pulls.scroll.set(usize::MAX),
+            Panel::Tasks => self.tasks.to_last(),
         }
     }
 
@@ -222,6 +257,91 @@ impl App {
         }
     }
 
+    /// Tarefa atualmente selecionada no painel de tarefas.
+    fn selected_task(&self) -> Option<&TaskItem> {
+        self.tasks.items.get(self.tasks.cursor)
+    }
+
+    /// Alterna a tarefa selecionada entre concluída e pendente.
+    fn toggle_task(&mut self) {
+        if let Some(t) = self.selected_task() {
+            let cmd = if t.completed {
+                WorkerCmd::TaskReopen(t.id.clone())
+            } else {
+                WorkerCmd::TaskComplete(t.id.clone())
+            };
+            let _ = self.cmd_tx.send(cmd);
+        }
+    }
+
+    /// Abre o prompt de criação de tarefa.
+    fn open_add_task(&mut self) {
+        self.prompt = Some(Prompt::Input {
+            kind: InputKind::AddTask,
+            buffer: String::new(),
+        });
+    }
+
+    /// Abre o prompt de edição com o título atual da tarefa selecionada.
+    fn open_edit_task(&mut self) {
+        if let Some(t) = self.selected_task() {
+            self.prompt = Some(Prompt::Input {
+                kind: InputKind::EditTask { id: t.id.clone() },
+                buffer: t.title.clone(),
+            });
+        }
+    }
+
+    /// Abre a confirmação de exclusão da tarefa selecionada.
+    fn open_delete_task(&mut self) {
+        if let Some(t) = self.selected_task() {
+            self.prompt = Some(Prompt::ConfirmDelete {
+                id: t.id.clone(),
+                title: t.title.clone(),
+            });
+        }
+    }
+
+    /// Trata teclas quando um prompt de tarefa está aberto.
+    fn handle_prompt_key(&mut self, key: KeyEvent) {
+        match &mut self.prompt {
+            Some(Prompt::Input { buffer, .. }) => match key.code {
+                KeyCode::Esc => self.prompt = None,
+                KeyCode::Char(c) => buffer.push(c),
+                KeyCode::Backspace => {
+                    buffer.pop();
+                }
+                KeyCode::Enter => self.submit_prompt(),
+                _ => {}
+            },
+            Some(Prompt::ConfirmDelete { .. }) => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => self.submit_prompt(),
+                KeyCode::Char('n') | KeyCode::Esc => self.prompt = None,
+                _ => {}
+            },
+            None => {}
+        }
+    }
+
+    /// Confirma o prompt atual: dispara o comando ao worker e fecha o overlay.
+    fn submit_prompt(&mut self) {
+        let cmd = match self.prompt.take() {
+            Some(Prompt::Input { kind, buffer }) => {
+                let title = buffer.trim().to_string();
+                if title.is_empty() {
+                    return; // nada a fazer; prompt já foi fechado
+                }
+                match kind {
+                    InputKind::AddTask => WorkerCmd::TaskAdd(title),
+                    InputKind::EditTask { id } => WorkerCmd::TaskEdit { id, title },
+                }
+            }
+            Some(Prompt::ConfirmDelete { id, .. }) => WorkerCmd::TaskDelete(id),
+            None => return,
+        };
+        let _ = self.cmd_tx.send(cmd);
+    }
+
     /// Trata teclas no modo painel (dashboard).
     fn handle_panel_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -238,6 +358,11 @@ impl App {
             KeyCode::Char('r') => {
                 let _ = self.cmd_tx.send(WorkerCmd::RefreshAll);
             }
+            // Ações do painel de tarefas (só quando ele está focado).
+            KeyCode::Char(' ') if self.focus == Panel::Tasks => self.toggle_task(),
+            KeyCode::Char('a') if self.focus == Panel::Tasks => self.open_add_task(),
+            KeyCode::Char('e') if self.focus == Panel::Tasks => self.open_edit_task(),
+            KeyCode::Char('d') if self.focus == Panel::Tasks => self.open_delete_task(),
             _ => {}
         }
     }
@@ -255,6 +380,8 @@ impl Model for App {
             Msg::Key(key) => {
                 if self.detail.is_some() {
                     self.handle_detail_key(key);
+                } else if self.prompt.is_some() {
+                    self.handle_prompt_key(key);
                 } else {
                     self.handle_panel_key(key);
                 }
@@ -265,6 +392,8 @@ impl Model for App {
             }
             Msg::AgendaLoaded(res) => self.agenda.set(res),
             Msg::PullsLoaded(res) => self.pulls.set(res),
+            Msg::JiraLoaded(res) => self.jira.set(res),
+            Msg::TasksLoaded(res) => self.tasks.set(res),
             Msg::EmailBody(res) => {
                 if let Some(d) = &mut self.detail {
                     d.body = Some(res);
@@ -310,13 +439,17 @@ mod tests {
         let mut app = test_app();
         assert_eq!(app.focus, Panel::Email);
         app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus, Panel::Jira);
+        app.update(key(KeyCode::Tab));
         assert_eq!(app.focus, Panel::Agenda);
         app.update(key(KeyCode::Tab));
         assert_eq!(app.focus, Panel::Pulls);
         app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus, Panel::Tasks);
+        app.update(key(KeyCode::Tab));
         assert_eq!(app.focus, Panel::Email);
         app.update(key(KeyCode::BackTab));
-        assert_eq!(app.focus, Panel::Pulls);
+        assert_eq!(app.focus, Panel::Tasks);
     }
 
     #[test]
@@ -406,5 +539,126 @@ mod tests {
         app.update(Msg::PullsLoaded(Err("falhou".into())));
         assert!(app.pulls.loaded);
         assert_eq!(app.pulls.error.as_deref(), Some("falhou"));
+    }
+
+    // --- Painel de tarefas (interativo) ---
+
+    /// App que preserva o receiver do worker, para inspecionar os comandos.
+    fn task_app(items: Vec<TaskItem>) -> (App, mpsc::Receiver<WorkerCmd>) {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.tasks.set(Ok(items));
+        app.focus = Panel::Tasks;
+        (app, rx)
+    }
+
+    fn task(id: &str, title: &str, completed: bool) -> TaskItem {
+        TaskItem {
+            id: id.into(),
+            title: title.into(),
+            completed,
+            due: String::new(),
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn space_toggles_complete_for_pending_and_reopen_for_completed() {
+        let (mut app, rx) = task_app(vec![task("t1", "pendente", false), task("t2", "feita", true)]);
+        // Cursor em t1 (pendente) -> Complete.
+        app.update(key(KeyCode::Char(' ')));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskComplete(id) => assert_eq!(id, "t1"),
+            _ => panic!("esperava TaskComplete"),
+        }
+        // Move para t2 (concluída) -> Reopen.
+        app.update(key(KeyCode::Char('j')));
+        app.update(key(KeyCode::Char(' ')));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskReopen(id) => assert_eq!(id, "t2"),
+            _ => panic!("esperava TaskReopen"),
+        }
+    }
+
+    #[test]
+    fn add_prompt_collects_text_and_submits_task_add() {
+        let (mut app, rx) = task_app(vec![]);
+        app.update(key(KeyCode::Char('a')));
+        assert!(app.prompt.is_some());
+        for c in "oi".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        assert!(app.prompt.is_none(), "prompt fecha ao enviar");
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskAdd(title) => assert_eq!(title, "oi"),
+            _ => panic!("esperava TaskAdd"),
+        }
+    }
+
+    #[test]
+    fn esc_cancels_prompt_without_command() {
+        let (mut app, rx) = task_app(vec![]);
+        app.update(key(KeyCode::Char('a')));
+        app.update(key(KeyCode::Char('x')));
+        app.update(key(KeyCode::Esc));
+        assert!(app.prompt.is_none());
+        assert!(rx.try_recv().is_err(), "nenhum comando deve ser enviado");
+    }
+
+    #[test]
+    fn empty_title_submits_nothing() {
+        let (mut app, rx) = task_app(vec![]);
+        app.update(key(KeyCode::Char('a')));
+        app.update(key(KeyCode::Enter)); // buffer vazio
+        assert!(app.prompt.is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn edit_prompt_prefills_title_and_submits_edit() {
+        let (mut app, rx) = task_app(vec![task("t9", "antigo", false)]);
+        app.update(key(KeyCode::Char('e')));
+        match &app.prompt {
+            Some(Prompt::Input { buffer, .. }) => assert_eq!(buffer, "antigo"),
+            _ => panic!("esperava prompt de edição preenchido"),
+        }
+        app.update(key(KeyCode::Char('!')));
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskEdit { id, title } => {
+                assert_eq!(id, "t9");
+                assert_eq!(title, "antigo!");
+            }
+            _ => panic!("esperava TaskEdit"),
+        }
+    }
+
+    #[test]
+    fn delete_confirms_then_sends_delete() {
+        let (mut app, rx) = task_app(vec![task("t5", "apagar", false)]);
+        app.update(key(KeyCode::Char('d')));
+        assert!(matches!(app.prompt, Some(Prompt::ConfirmDelete { .. })));
+        // 'n' cancela.
+        app.update(key(KeyCode::Char('n')));
+        assert!(app.prompt.is_none());
+        assert!(rx.try_recv().is_err());
+        // 'd' de novo e 'y' confirma.
+        app.update(key(KeyCode::Char('d')));
+        app.update(key(KeyCode::Char('y')));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskDelete(id) => assert_eq!(id, "t5"),
+            _ => panic!("esperava TaskDelete"),
+        }
+    }
+
+    #[test]
+    fn task_keys_do_nothing_when_panel_not_focused() {
+        let (mut app, rx) = task_app(vec![task("t1", "x", false)]);
+        app.focus = Panel::Email;
+        app.update(key(KeyCode::Char('a')));
+        assert!(app.prompt.is_none());
+        app.update(key(KeyCode::Char(' ')));
+        assert!(rx.try_recv().is_err());
     }
 }

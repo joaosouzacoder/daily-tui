@@ -66,6 +66,19 @@ fn weekday_ptbr(w: Weekday) -> &'static str {
     }
 }
 
+/// Nome curto e capitalizado do dia da semana: "Terça", "Quarta"…
+pub fn weekday_short_ptbr(w: Weekday) -> &'static str {
+    match w {
+        Weekday::Mon => "Segunda",
+        Weekday::Tue => "Terça",
+        Weekday::Wed => "Quarta",
+        Weekday::Thu => "Quinta",
+        Weekday::Fri => "Sexta",
+        Weekday::Sat => "Sábado",
+        Weekday::Sun => "Domingo",
+    }
+}
+
 fn month_ptbr(m: u32) -> &'static str {
     match m {
         1 => "janeiro",

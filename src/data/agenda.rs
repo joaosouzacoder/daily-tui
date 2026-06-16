@@ -73,11 +73,12 @@ pub fn fetch(account: Account) -> Result<Vec<AgendaItem>, String> {
 
     // `--calendar` é opção global (antes do subcomando) e restringe à calendar
     // primária da conta — exclui salas e calendars de colegas assinadas.
+    let calendar = account.primary_calendar();
     let output = Command::new("gcalcli")
         .env("XDG_DATA_HOME", &data_home)
         .args([
             "--calendar",
-            account.primary_calendar(),
+            &calendar,
             "agenda",
             &start_arg,
             &end_arg,
