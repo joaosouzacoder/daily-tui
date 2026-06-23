@@ -23,4 +23,6 @@ pub enum Msg {
     TasksLoaded(Result<Vec<TaskItem>, String>),
     /// Corpo de um e-mail aberto no overlay de detalhe.
     EmailBody(Result<String, String>),
+    /// Pastas/marcadores da conta, para o seletor de "mover e-mail".
+    FoldersLoaded(Result<Vec<String>, String>),
 }

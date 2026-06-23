@@ -10,7 +10,7 @@ use ratatui_bubbletea_components::{Spinner, SpinnerFrames};
 use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
-use crate::data::{AgendaItem, EmailItem, TaskItem};
+use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
 use crate::ui;
 use crate::worker::WorkerCmd;
@@ -130,6 +130,50 @@ pub struct Detail {
     pub scroll: usize,
 }
 
+/// Overlay de seleção de pasta/marcador para mover o e-mail selecionado.
+pub struct FolderPicker {
+    /// Conta do e-mail a mover.
+    pub account: Account,
+    /// ID do e-mail a mover.
+    pub email_id: String,
+    /// Assunto, exibido no título do overlay.
+    pub subject: String,
+    /// `None` enquanto carrega; depois a lista de pastas ou um erro.
+    pub folders: Option<Result<Vec<String>, String>>,
+    /// Pasta selecionada.
+    pub cursor: usize,
+}
+
+impl FolderPicker {
+    /// As pastas já carregadas (vazio enquanto carrega ou em erro).
+    fn folder_list(&self) -> &[String] {
+        match &self.folders {
+            Some(Ok(v)) => v,
+            _ => &[],
+        }
+    }
+
+    /// Move o cursor por `delta`, mantendo-o dentro dos limites.
+    fn move_cursor(&mut self, delta: isize) {
+        let len = self.folder_list().len();
+        if len == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let max = (len - 1) as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, max) as usize;
+    }
+
+    fn to_last(&mut self) {
+        self.cursor = self.folder_list().len().saturating_sub(1);
+    }
+
+    /// Pasta atualmente selecionada.
+    fn selected(&self) -> Option<&String> {
+        self.folder_list().get(self.cursor)
+    }
+}
+
 /// O que um prompt de texto está coletando.
 pub enum InputKind {
     /// Criar uma nova tarefa.
@@ -161,6 +205,7 @@ pub struct App {
     pub last_refresh: Option<DateTime<Local>>,
     pub detail: Option<Detail>,
     pub prompt: Option<Prompt>,
+    pub folder_picker: Option<FolderPicker>,
     cmd_tx: Sender<WorkerCmd>,
 }
 
@@ -183,6 +228,7 @@ impl App {
             last_refresh: None,
             detail: None,
             prompt: None,
+            folder_picker: None,
             cmd_tx,
         }
     }
@@ -235,6 +281,79 @@ impl App {
                 id: item.id.clone(),
             });
         }
+    }
+
+    /// Alterna o e-mail selecionado entre lido e não-lido.
+    fn toggle_email_seen(&mut self) {
+        if self.focus != Panel::Email {
+            return;
+        }
+        if let Some(e) = self.emails.items.get(self.emails.cursor) {
+            let _ = self.cmd_tx.send(WorkerCmd::SetEmailSeen {
+                account: e.account,
+                id: e.id.clone(),
+                // não-lido -> marca como lido; lido -> volta a não-lido.
+                seen: e.unread,
+            });
+        }
+    }
+
+    /// Abre o seletor de pasta para o e-mail selecionado e pede as pastas.
+    fn open_folder_picker(&mut self) {
+        if self.focus != Panel::Email {
+            return;
+        }
+        if let Some(e) = self.emails.items.get(self.emails.cursor) {
+            self.folder_picker = Some(FolderPicker {
+                account: e.account,
+                email_id: e.id.clone(),
+                subject: e.subject.clone(),
+                folders: None,
+                cursor: 0,
+            });
+            let _ = self.cmd_tx.send(WorkerCmd::ListFolders(e.account));
+        }
+    }
+
+    /// Trata teclas quando o seletor de pasta está aberto.
+    fn handle_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.folder_picker = None,
+            KeyCode::Enter => self.confirm_move(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(p) = &mut self.folder_picker {
+                    p.move_cursor(1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(p) = &mut self.folder_picker {
+                    p.move_cursor(-1);
+                }
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                if let Some(p) = &mut self.folder_picker {
+                    p.cursor = 0;
+                }
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                if let Some(p) = &mut self.folder_picker {
+                    p.to_last();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Move o e-mail para a pasta selecionada e fecha o seletor.
+    fn confirm_move(&mut self) {
+        let Some(picker) = &self.folder_picker else { return };
+        let Some(target) = picker.selected().cloned() else { return };
+        let _ = self.cmd_tx.send(WorkerCmd::MoveEmail {
+            account: picker.account,
+            id: picker.email_id.clone(),
+            target,
+        });
+        self.folder_picker = None;
     }
 
     /// Trata teclas quando o overlay de detalhe está aberto.
@@ -358,6 +477,9 @@ impl App {
             KeyCode::Char('r') => {
                 let _ = self.cmd_tx.send(WorkerCmd::RefreshAll);
             }
+            // Ações do painel de e-mails (só quando ele está focado).
+            KeyCode::Char(' ') if self.focus == Panel::Email => self.toggle_email_seen(),
+            KeyCode::Char('m') if self.focus == Panel::Email => self.open_folder_picker(),
             // Ações do painel de tarefas (só quando ele está focado).
             KeyCode::Char(' ') if self.focus == Panel::Tasks => self.toggle_task(),
             KeyCode::Char('a') if self.focus == Panel::Tasks => self.open_add_task(),
@@ -380,6 +502,8 @@ impl Model for App {
             Msg::Key(key) => {
                 if self.detail.is_some() {
                     self.handle_detail_key(key);
+                } else if self.folder_picker.is_some() {
+                    self.handle_picker_key(key);
                 } else if self.prompt.is_some() {
                     self.handle_prompt_key(key);
                 } else {
@@ -397,6 +521,12 @@ impl Model for App {
             Msg::EmailBody(res) => {
                 if let Some(d) = &mut self.detail {
                     d.body = Some(res);
+                }
+            }
+            Msg::FoldersLoaded(res) => {
+                if let Some(p) = &mut self.folder_picker {
+                    p.folders = Some(res);
+                    p.cursor = 0;
                 }
             }
         }
@@ -497,6 +627,72 @@ mod tests {
         app.update(key(KeyCode::Enter));
         assert!(app.detail.is_some(), "email abre detalhe");
         assert_eq!(app.detail.as_ref().unwrap().subject, "s1");
+    }
+
+    #[test]
+    fn space_toggles_seen_for_selected_email() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        let mut unread = email("1");
+        unread.unread = true;
+        app.emails.set(Ok(vec![unread]));
+        app.focus = Panel::Email;
+        app.update(key(KeyCode::Char(' ')));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::SetEmailSeen { id, seen, .. } => {
+                assert_eq!(id, "1");
+                assert!(seen, "não-lido -> marca como lido");
+            }
+            _ => panic!("esperava SetEmailSeen"),
+        }
+    }
+
+    #[test]
+    fn m_opens_folder_picker_and_requests_folders() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.emails.set(Ok(vec![email("7")]));
+        app.focus = Panel::Email;
+        app.update(key(KeyCode::Char('m')));
+        assert!(app.folder_picker.is_some());
+        assert!(matches!(rx.try_recv().unwrap(), WorkerCmd::ListFolders(_)));
+    }
+
+    #[test]
+    fn folders_loaded_fills_picker_and_enter_moves() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.emails.set(Ok(vec![email("9")]));
+        app.focus = Panel::Email;
+        app.update(key(KeyCode::Char('m')));
+        let _ = rx.try_recv(); // consome ListFolders
+        app.update(Msg::FoldersLoaded(Ok(vec![
+            "INBOX".into(),
+            "[Gmail]/Lixeira".into(),
+        ])));
+        app.update(key(KeyCode::Char('j'))); // seleciona a lixeira
+        app.update(key(KeyCode::Enter));
+        assert!(app.folder_picker.is_none(), "picker fecha ao mover");
+        match rx.try_recv().unwrap() {
+            WorkerCmd::MoveEmail { id, target, .. } => {
+                assert_eq!(id, "9");
+                assert_eq!(target, "[Gmail]/Lixeira");
+            }
+            _ => panic!("esperava MoveEmail"),
+        }
+    }
+
+    #[test]
+    fn esc_cancels_folder_picker_without_command() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.emails.set(Ok(vec![email("3")]));
+        app.focus = Panel::Email;
+        app.update(key(KeyCode::Char('m')));
+        let _ = rx.try_recv(); // consome ListFolders
+        app.update(key(KeyCode::Esc));
+        assert!(app.folder_picker.is_none());
+        assert!(rx.try_recv().is_err(), "nenhum MoveEmail deve ser enviado");
     }
 
     #[test]

@@ -19,6 +19,12 @@ pub enum WorkerCmd {
     RefreshAll,
     /// Busca o corpo de um e-mail para o overlay de detalhe.
     ReadEmail { account: Account, id: String },
+    /// Marca/desmarca um e-mail como lido; depois re-busca a lista.
+    SetEmailSeen { account: Account, id: String, seen: bool },
+    /// Move um e-mail para a pasta `target`; depois re-busca a lista.
+    MoveEmail { account: Account, id: String, target: String },
+    /// Lista as pastas da conta (para o seletor de "mover").
+    ListFolders(Account),
     /// Escrita no Google Tasks; após executar, re-busca a lista.
     TaskComplete(String),
     TaskReopen(String),
@@ -47,6 +53,15 @@ pub fn spawn(
                 Ok(WorkerCmd::RefreshAll) | Err(RecvTimeoutError::Timeout) => refresh_all(&ui),
                 Ok(WorkerCmd::ReadEmail { account, id }) => {
                     let _ = ui.send(Msg::EmailBody(email::fetch_body(account, &id)));
+                }
+                Ok(WorkerCmd::SetEmailSeen { account, id, seen }) => {
+                    mutate_emails(&ui, email::set_seen(account, &id, seen))
+                }
+                Ok(WorkerCmd::MoveEmail { account, id, target }) => {
+                    mutate_emails(&ui, email::move_to(account, &id, &target))
+                }
+                Ok(WorkerCmd::ListFolders(account)) => {
+                    let _ = ui.send(Msg::FoldersLoaded(email::folders(account)));
                 }
                 Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
                 Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),
@@ -77,6 +92,13 @@ fn refresh_all(ui: &ProgramHandle<Msg>) {
 fn mutate_tasks(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
     let loaded = result.and_then(|()| tasks::fetch());
     let _ = ui.send(Msg::TasksLoaded(loaded));
+}
+
+/// Aplica uma escrita de e-mail (flag/move) e re-busca a lista. Se a escrita
+/// falhar, propaga o erro para o painel; senão, manda a lista atualizada.
+fn mutate_emails(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
+    let loaded = result.and_then(|()| fetch_emails());
+    let _ = ui.send(Msg::EmailsLoaded(loaded));
 }
 
 /// Agrega e-mails das duas contas e ordena do mais recente para o mais antigo.

@@ -51,6 +51,40 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
     if app.prompt.is_some() {
         render_prompt(app, frame, frame.area());
     }
+    if app.folder_picker.is_some() {
+        render_folder_picker(app, frame, frame.area());
+    }
+}
+
+/// Overlay do seletor de pasta (mover e-mail). Mostra spinner enquanto carrega,
+/// erro, ou a lista de pastas com a selecionada destacada.
+fn render_folder_picker(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let Some(picker) = &app.folder_picker else { return };
+
+    let popup = centered_rect(50, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = theme.titled_modal_block(format!(" Mover: {} ", clip(&picker.subject, 40)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    match &picker.folders {
+        None => frame.render_widget(&app.spinner, inner),
+        Some(Err(e)) => frame.render_widget(
+            theme.paragraph(theme.error(format!("erro: {e}"))).wrap(Wrap { trim: true }),
+            inner,
+        ),
+        Some(Ok(folders)) => {
+            let lines: Vec<Line> = folders
+                .iter()
+                .enumerate()
+                .map(|(i, f)| highlight(Line::from(theme.span(f.clone())), theme, i == picker.cursor))
+                .collect();
+            let height = inner.height as usize;
+            let off = window(lines.len(), picker.cursor, 0, height);
+            render_lines(frame, theme, inner, lines, off);
+        }
+    }
 }
 
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -374,8 +408,19 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
     let help = if app.detail.is_some() {
         theme.help_line([("j/k", "rolar"), ("Esc", "voltar")])
+    } else if app.folder_picker.is_some() {
+        theme.help_line([("j/k", "navegar"), ("Enter", "mover"), ("Esc", "cancelar")])
     } else if app.prompt.is_some() {
         theme.help_line([("Enter/y", "confirmar"), ("Esc/n", "cancelar")])
+    } else if app.focus == Panel::Email {
+        theme.help_line([
+            ("Tab", "painel"),
+            ("j/k", "rolar"),
+            ("Enter", "abrir"),
+            ("Espaço", "lido"),
+            ("m", "mover"),
+            ("q", "sair"),
+        ])
     } else if app.focus == Panel::Tasks {
         theme.help_line([
             ("Espaço", "concluir"),
@@ -497,7 +542,7 @@ fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, Detail};
+    use crate::app::{App, Detail, FolderPicker};
     use crate::data::{Account, AgendaItem, EmailItem};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -656,6 +701,22 @@ mod tests {
         let out = render_to_string(&app, 100, 30);
         assert!(out.contains("Apagar tarefa"));
         assert!(out.contains("apagar isto"));
+    }
+
+    #[test]
+    fn folder_picker_overlay_renders_subject_and_folders() {
+        let mut app = test_app();
+        app.folder_picker = Some(FolderPicker {
+            account: Account::Work,
+            email_id: "1".into(),
+            subject: "Relatório".into(),
+            folders: Some(Ok(vec!["INBOX".into(), "[Gmail]/Lixeira".into()])),
+            cursor: 1,
+        });
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("Mover: Relatório"));
+        assert!(out.contains("[Gmail]/Lixeira"));
+        assert!(out.contains("mover")); // ajuda do rodapé muda no modo seletor
     }
 
     #[test]

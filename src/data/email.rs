@@ -132,6 +132,50 @@ pub fn fetch_body(account: Account, id: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Marca (ou desmarca) um e-mail como lido, adicionando/removendo a flag `Seen`.
+pub fn set_seen(account: Account, id: &str, seen: bool) -> Result<(), String> {
+    let verb = if seen { "add" } else { "remove" };
+    run(&["flag", verb, id, "seen", "-a", account.himalaya_name()]).map(|_| ())
+}
+
+/// Move um e-mail para a pasta/marcador `target` (inclui a lixeira).
+///
+/// A pasta de origem é a INBOX (default do himalaya), que é de onde a lista vem.
+pub fn move_to(account: Account, id: &str, target: &str) -> Result<(), String> {
+    run(&["message", "move", target, id, "-a", account.himalaya_name()]).map(|_| ())
+}
+
+/// Lista as pastas/marcadores disponíveis na conta (para o seletor de "mover").
+pub fn folders(account: Account) -> Result<Vec<String>, String> {
+    let json = run(&["folder", "list", "-a", account.himalaya_name(), "-o", "json"])?;
+    parse_folders(&json)
+}
+
+/// Extrai os nomes das pastas do JSON de `himalaya folder list -o json`.
+pub fn parse_folders(json: &str) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct Folder {
+        name: String,
+    }
+    let folders: Vec<Folder> =
+        serde_json::from_str(json).map_err(|e| format!("JSON inválido: {e}"))?;
+    Ok(folders.into_iter().map(|f| f.name).collect())
+}
+
+/// Roda `himalaya <args...>` e devolve o stdout (ou um erro com o stderr).
+fn run(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("himalaya")
+        .args(args)
+        .output()
+        .map_err(|e| format!("falha ao executar himalaya: {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("himalaya falhou: {}", err.lines().last().unwrap_or("")));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +210,13 @@ mod tests {
     #[test]
     fn empty_array_yields_no_items() {
         assert_eq!(parse_envelopes("[]", Account::Personal).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parses_folder_names_from_json() {
+        let json = r#"[{"name":"INBOX","desc":"x"},{"name":"[Gmail]/Lixeira","desc":"\\Trash"}]"#;
+        let folders = parse_folders(json).unwrap();
+        assert_eq!(folders, vec!["INBOX".to_string(), "[Gmail]/Lixeira".to_string()]);
     }
 
     #[test]
