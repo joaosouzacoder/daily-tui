@@ -1,8 +1,6 @@
 //! Busca dos tickets do Jira atribuídos a mim e abertos, via `jirapending`
 //! (saída colorida em ANSI, agrupada por projeto).
 
-use std::process::Command;
-
 /// Quebra a saída crua do `jirapending` em linhas, **preservando** os escapes
 /// ANSI (as cores são reaplicadas na renderização via `crate::ansi`).
 /// Descarta apenas as linhas em branco nas pontas.
@@ -19,7 +17,7 @@ pub fn parse_jira(raw: &str) -> Vec<String> {
 
 /// Roda o `jirapending` e devolve as linhas (com ANSI).
 pub fn fetch() -> Result<Vec<String>, String> {
-    let output = Command::new("jirapending")
+    let output = super::helper_command("jirapending")
         .output()
         .map_err(|e| format!("falha ao executar jirapending: {e}"))?;
 

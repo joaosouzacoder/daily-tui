@@ -1,5 +1,6 @@
 //! Busca e parsing de eventos de agenda via `gcalcli --tsv`.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use chrono::{Duration, Local};
@@ -60,11 +61,69 @@ pub fn sort_chronologically(items: &mut [AgendaItem]) {
     items.sort_by(|a, b| a.date.cmp(&b.date).then(a.time.cmp(&b.time)));
 }
 
-/// Busca a agenda dos próximos 7 dias de uma conta rodando o `gcalcli` com o
-/// `XDG_DATA_HOME` isolado por conta.
+/// Diretório de dados por conta do gcalcli no Unix.
+///
+/// Lá o `gcalcli` (via `platformdirs`) respeita `XDG_DATA_HOME`, então basta
+/// isolar cada conta num subdiretório e passar essa var no comando — os tokens
+/// OAuth de *work* e *personal* ficam separados naturalmente.
+#[cfg(not(windows))]
+fn gcalcli_data_home(account: Account) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or_else(|| "HOME não definido".to_string())?;
+    Ok(PathBuf::from(home)
+        .join(".local/share/gcalcli-accounts")
+        .join(account.gcalcli_dir()))
+}
+
+/// Caminho fixo do token OAuth do gcalcli no Windows —
+/// `platformdirs.user_data_path("gcalcli")` = `%LOCALAPPDATA%\gcalcli\gcalcli`.
+#[cfg(windows)]
+fn gcalcli_canonical_token() -> Result<PathBuf, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| "LOCALAPPDATA não definido".to_string())?;
+    Ok(PathBuf::from(base).join("gcalcli").join("gcalcli").join("oauth"))
+}
+
+/// Token OAuth guardado por conta: `%LOCALAPPDATA%\gcalcli-accounts\<conta>\oauth`.
+#[cfg(windows)]
+fn gcalcli_account_token(account: Account) -> Result<PathBuf, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| "LOCALAPPDATA não definido".to_string())?;
+    Ok(PathBuf::from(base)
+        .join("gcalcli-accounts")
+        .join(account.gcalcli_dir())
+        .join("oauth"))
+}
+
+/// Ativa a conta no Windows copiando o token dela para o caminho fixo do gcalcli.
+///
+/// No Windows o `platformdirs` ignora env vars (usa a API do sistema) e o
+/// gcalcli sempre lê/grava o token no mesmo lugar — não dá para isolar por
+/// diretório como no Unix. Mantemos um token por conta e trocamos o ativo antes
+/// de cada consulta. O worker chama as contas em série, então não há corrida.
+#[cfg(windows)]
+fn activate_account(account: Account) -> Result<(), String> {
+    let src = gcalcli_account_token(account)?;
+    if !src.exists() {
+        return Err(format!(
+            "conta '{}' sem token — rode scripts/google-auth.ps1",
+            account.gcalcli_dir()
+        ));
+    }
+    let dst = gcalcli_canonical_token()?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("falha ao criar {}: {e}", parent.display()))?;
+    }
+    std::fs::copy(&src, &dst).map_err(|e| format!("falha ao ativar conta gcalcli: {e}"))?;
+    Ok(())
+}
+
+/// Busca a agenda dos próximos 7 dias de uma conta rodando o `gcalcli`.
 pub fn fetch(account: Account) -> Result<Vec<AgendaItem>, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME não definido".to_string())?;
-    let data_home = format!("{home}/.local/share/gcalcli-accounts/{}", account.gcalcli_dir());
+    // Windows: seleciona a conta trocando o token OAuth ativo (o platformdirs
+    // ignora env vars). Unix: isola por `XDG_DATA_HOME` no comando abaixo.
+    #[cfg(windows)]
+    activate_account(account)?;
 
     let today = Local::now().date_naive();
     let end = today + Duration::days(7);
@@ -74,8 +133,13 @@ pub fn fetch(account: Account) -> Result<Vec<AgendaItem>, String> {
     // `--calendar` é opção global (antes do subcomando) e restringe à calendar
     // primária da conta — exclui salas e calendars de colegas assinadas.
     let calendar = account.primary_calendar();
-    let output = Command::new("gcalcli")
-        .env("XDG_DATA_HOME", &data_home)
+    let mut cmd = Command::new("gcalcli");
+    #[cfg(not(windows))]
+    {
+        let data_home = gcalcli_data_home(account)?;
+        cmd.env("XDG_DATA_HOME", &data_home);
+    }
+    let output = cmd
         .args([
             "--calendar",
             &calendar,

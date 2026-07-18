@@ -1,1 +1,4 @@
 /target
+
+# Config local do launcher Windows (e-mails + referências 1Password) — pessoal.
+/scripts/daily-tui.config.ps1

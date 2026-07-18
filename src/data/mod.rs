@@ -10,6 +10,25 @@ pub use agenda::AgendaItem;
 pub use email::EmailItem;
 pub use tasks::TaskItem;
 
+/// Cria um `Command` para um helper externo, tratando a diferença do Windows.
+///
+/// No Windows, `jirapending` e `gtasks` são shims `.cmd` — e o `CreateProcess`
+/// (usado por `Command`) só executa `.exe` diretamente, então rodamos via
+/// `cmd /C`. As CLIs `.exe` (himalaya/gcalcli/ghpending) chamam direto e não
+/// passam por aqui. No Unix é sempre exec direto.
+pub fn helper_command(program: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").arg(program);
+        cmd
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(program)
+    }
+}
+
 /// Conta de origem de um item (e-mail ou agenda).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Account {

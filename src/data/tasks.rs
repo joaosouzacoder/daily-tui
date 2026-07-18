@@ -4,8 +4,6 @@
 //! `edit`/`delete`. O painel é interativo, então diferente de PRs/Jira aqui os
 //! itens são estruturados (precisamos do `id` para agir na tarefa selecionada).
 
-use std::process::Command;
-
 use serde::Deserialize;
 
 /// Uma tarefa do Google Tasks.
@@ -58,7 +56,7 @@ pub fn delete(id: &str) -> Result<(), String> {
 
 /// Roda `gtasks <args...>` e devolve o stdout (ou um erro com o stderr).
 fn run(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("gtasks")
+    let output = super::helper_command("gtasks")
         .args(args)
         .output()
         .map_err(|e| format!("falha ao executar gtasks: {e}"))?;
