@@ -1,0 +1,248 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "msal",
+#   "requests",
+# ]
+# ///
+"""mstodo — CLI mínima para o Microsoft To Do (conta pessoal), usada pelo daily-tui.
+
+Subcomandos:
+  mstodo auth                  # consent único (device code), salva o token
+  mstodo list                  # JSON das tarefas da lista configurada
+  mstodo add "<título>"
+  mstodo complete <id>
+  mstodo reopen <id>
+  mstodo edit <id> "<título>"
+  mstodo delete <id>
+
+Configuração (veja scripts/daily-tui.env.example):
+  DAILY_TUI_TODO_CLIENT_ID — Application (client) ID do app registration (obrigatório)
+  DAILY_TUI_TODO_LIST      — nome da lista; vazio = lista padrão do To Do
+  MSTODO_TOKEN             — sobrescreve o caminho do cache de token
+
+Todo erro sai como UMA linha no stderr: o painel do daily-tui mostra só o
+resumo (ver `stderr_summary` em src/data/mod.rs), então traceback não ajuda.
+"""
+import json
+import os
+import sys
+from functools import cache
+from pathlib import Path
+
+import msal
+import requests
+
+GRAPH = "https://graph.microsoft.com/v1.0"
+AUTHORITY = "https://login.microsoftonline.com/consumers"
+SCOPES = ["Tasks.ReadWrite"]
+TIMEOUT = 30
+
+TOKEN = Path(os.environ.get(
+    "MSTODO_TOKEN",
+    str(Path.home() / ".local/share/daily-tui/mstodo-personal.json")))
+# Sidecar com o id da lista resolvido — não vai dentro do cache do MSAL, que
+# tem formato próprio.
+LIST_CACHE = TOKEN.with_name("mstodo-list.json")
+
+
+def die(msg):
+    """Sai com código 1 e a mensagem no stderr."""
+    sys.exit(str(msg))
+
+
+def client_id():
+    cid = os.environ.get("DAILY_TUI_TODO_CLIENT_ID", "").strip()
+    if not cid:
+        die("defina DAILY_TUI_TODO_CLIENT_ID")
+    return cid
+
+
+def build_app():
+    """Devolve (app MSAL, cache) com o cache lido do disco, se existir."""
+    token_cache = msal.SerializableTokenCache()
+    if TOKEN.exists():
+        token_cache.deserialize(TOKEN.read_text(encoding="utf-8"))
+    app = msal.PublicClientApplication(
+        client_id(), authority=AUTHORITY, token_cache=token_cache)
+    return app, token_cache
+
+
+def save_cache(token_cache):
+    if not token_cache.has_state_changed:
+        return
+    TOKEN.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN.write_text(token_cache.serialize(), encoding="utf-8")
+    if os.name != "nt":
+        TOKEN.chmod(0o600)
+
+
+@cache
+def bearer():
+    """Access token válido, renovado pelo refresh token quando preciso."""
+    app, token_cache = build_app()
+    accounts = app.get_accounts()
+    result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
+    save_cache(token_cache)
+    if not result or "access_token" not in result:
+        die("sem credenciais — rode: mstodo auth")
+    return result["access_token"]
+
+
+def do_auth():
+    app, token_cache = build_app()
+    flow = app.initiate_device_flow(scopes=SCOPES)
+    if "user_code" not in flow:
+        die(f"device flow falhou: {flow.get('error_description') or flow}")
+    print(flow["message"], flush=True)
+    result = app.acquire_token_by_device_flow(flow)
+    save_cache(token_cache)
+    if "access_token" not in result:
+        die(f"autorização falhou: {result.get('error_description') or result}")
+    print(f"ok — token salvo em {TOKEN}")
+
+
+def error_message(resp):
+    try:
+        return resp.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return resp.text[:200].replace("\n", " ")
+
+
+def request(method, url, **kw):
+    resp = requests.request(
+        method, url,
+        headers={"Authorization": f"Bearer {bearer()}"}, timeout=TIMEOUT, **kw)
+    if not resp.ok:
+        die(f"Graph {resp.status_code}: {error_message(resp)}")
+    return resp
+
+
+@cache
+def list_id():
+    """Id da lista configurada, com cache em disco para poupar uma chamada."""
+    want = os.environ.get("DAILY_TUI_TODO_LIST", "").strip()
+    if LIST_CACHE.exists():
+        try:
+            cached = json.loads(LIST_CACHE.read_text(encoding="utf-8"))
+            if cached.get("name", "") == want and cached.get("id"):
+                return cached["id"]
+        except (OSError, ValueError):
+            pass
+
+    lists = request("GET", f"{GRAPH}/me/todo/lists").json().get("value", [])
+    if want:
+        found = next((l for l in lists
+                      if (l.get("displayName") or "").casefold() == want.casefold()), None)
+        if not found:
+            die(f"lista '{want}' não encontrada")
+    else:
+        found = next((l for l in lists
+                      if l.get("wellknownListName") == "defaultList"), None)
+        if not found:
+            die("lista padrão do To Do não encontrada")
+
+    LIST_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    LIST_CACHE.write_text(
+        json.dumps({"name": want, "id": found["id"]}), encoding="utf-8")
+    return found["id"]
+
+
+def in_list(method, suffix="", **kw):
+    """Chama o Graph dentro da lista configurada.
+
+    Um 404 na primeira tentativa pode ser id de lista velho (lista apagada ou
+    recriada), então invalida o cache e tenta de novo. Se o 404 for do id da
+    tarefa, a segunda tentativa falha com a mensagem do Graph.
+    """
+    for attempt in (1, 2):
+        url = f"{GRAPH}/me/todo/lists/{list_id()}/tasks{suffix}"
+        resp = requests.request(
+            method, url,
+            headers={"Authorization": f"Bearer {bearer()}"}, timeout=TIMEOUT, **kw)
+        if resp.status_code == 404 and attempt == 1:
+            LIST_CACHE.unlink(missing_ok=True)
+            list_id.cache_clear()
+            continue
+        if not resp.ok:
+            die(f"Graph {resp.status_code}: {error_message(resp)}")
+        return resp
+    return None  # inalcançável: a segunda volta retorna ou chama die()
+
+
+def to_item(task):
+    """Converte um todoTask do Graph no contrato que o daily-tui espera."""
+    due = ((task.get("dueDateTime") or {}).get("dateTime") or "")[:10]
+    return {
+        "id": task["id"],
+        "title": (task.get("title") or "").strip(),
+        "completed": task.get("status") == "completed",
+        "due": due,
+        "notes": ((task.get("body") or {}).get("content") or "").strip(),
+    }
+
+
+def do_list():
+    raw = []
+    resp = in_list("GET", "?$top=100")
+    while True:
+        page = resp.json()
+        raw.extend(page.get("value", []))
+        nxt = page.get("@odata.nextLink")
+        if not nxt:
+            break
+        resp = request("GET", nxt)
+
+    created = {t["id"]: t.get("createdDateTime") or "" for t in raw}
+    items = [to_item(t) for t in raw]
+    # Pendentes primeiro; depois vencimento (sem data no fim); depois criação.
+    items.sort(key=lambda i: (i["completed"], i["due"] == "", i["due"], created[i["id"]]))
+    print(json.dumps(items, ensure_ascii=False))
+
+
+def do_add(title):
+    in_list("POST", "", json={"title": title})
+
+
+def do_complete(tid):
+    in_list("PATCH", f"/{tid}", json={"status": "completed"})
+
+
+def do_reopen(tid):
+    in_list("PATCH", f"/{tid}", json={"status": "notStarted"})
+
+
+def do_edit(tid, title):
+    in_list("PATCH", f"/{tid}", json={"title": title})
+
+
+def do_delete(tid):
+    in_list("DELETE", f"/{tid}")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        die("uso: mstodo {auth|list|add|complete|reopen|edit|delete}")
+    cmd, rest = args[0], args[1:]
+    if cmd == "auth":
+        do_auth()
+    elif cmd == "list":
+        do_list()
+    elif cmd == "add":
+        do_add(rest[0])
+    elif cmd == "complete":
+        do_complete(rest[0])
+    elif cmd == "reopen":
+        do_reopen(rest[0])
+    elif cmd == "edit":
+        do_edit(rest[0], rest[1])
+    elif cmd == "delete":
+        do_delete(rest[0])
+    else:
+        die(f"comando desconhecido: {cmd}")
+
+
+if __name__ == "__main__":
+    main()
