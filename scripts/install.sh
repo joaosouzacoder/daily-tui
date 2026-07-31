@@ -162,7 +162,8 @@ cat <<EOF
     Agora configure as AUTENTICAÇÕES (a parte que faz tudo funcionar):
 
       ./scripts/setup-auth.sh email     # e-mail (ortie + himalaya, abre o navegador)
-      ./scripts/setup-auth.sh google    # agenda + tarefas (OAuth do Google Cloud)
+      ./scripts/setup-auth.sh google    # agenda (OAuth do Google Cloud)
+      ./scripts/setup-auth.sh mstodo    # tarefas (Microsoft To Do)
       export GITHUB_TOKEN=... && ghpending add     # PRs/issues
       # Jira: defina JIRA_EMAIL / JIRA_CLOUD / JIRA_TOKEN (veja scripts/daily-tui.env.example)
 
