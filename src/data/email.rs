@@ -110,7 +110,7 @@ pub fn fetch(account: Account, limit: u32) -> Result<Vec<EmailItem>, String> {
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("himalaya falhou: {}", err.lines().last().unwrap_or("")));
+        return Err(format!("himalaya falhou: {}", super::stderr_summary(&err)));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -126,7 +126,7 @@ pub fn fetch_body(account: Account, id: &str) -> Result<String, String> {
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("himalaya falhou: {}", err.lines().last().unwrap_or("")));
+        return Err(format!("himalaya falhou: {}", super::stderr_summary(&err)));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())

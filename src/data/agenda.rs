@@ -134,6 +134,7 @@ pub fn fetch(account: Account) -> Result<Vec<AgendaItem>, String> {
     // primária da conta — exclui salas e calendars de colegas assinadas.
     let calendar = account.primary_calendar();
     let mut cmd = Command::new("gcalcli");
+    super::force_utf8_stdout(&mut cmd);
     #[cfg(not(windows))]
     {
         let data_home = gcalcli_data_home(account)?;
@@ -153,7 +154,7 @@ pub fn fetch(account: Account) -> Result<Vec<AgendaItem>, String> {
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gcalcli falhou: {}", err.lines().last().unwrap_or("")));
+        return Err(format!("gcalcli falhou: {}", super::stderr_summary(&err)));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

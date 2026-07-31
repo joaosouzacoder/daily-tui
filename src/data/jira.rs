@@ -23,7 +23,7 @@ pub fn fetch() -> Result<Vec<String>, String> {
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("jirapending falhou: {}", err.lines().last().unwrap_or("")));
+        return Err(format!("jirapending falhou: {}", super::stderr_summary(&err)));
     }
 
     Ok(parse_jira(&String::from_utf8_lossy(&output.stdout)))

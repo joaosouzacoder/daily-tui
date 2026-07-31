@@ -56,14 +56,18 @@ pub fn delete(id: &str) -> Result<(), String> {
 
 /// Roda `gtasks <args...>` e devolve o stdout (ou um erro com o stderr).
 fn run(args: &[&str]) -> Result<String, String> {
-    let output = super::helper_command("gtasks")
+    let mut cmd = super::helper_command("gtasks");
+    // O `gtasks` serializa com `ensure_ascii=False`, então títulos acentuados
+    // dependem da codificação do stdout (veja `force_utf8_stdout`).
+    super::force_utf8_stdout(&mut cmd);
+    let output = cmd
         .args(args)
         .output()
         .map_err(|e| format!("falha ao executar gtasks: {e}"))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("gtasks falhou: {}", err.lines().last().unwrap_or("")));
+        return Err(format!("gtasks falhou: {}", super::stderr_summary(&err)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
