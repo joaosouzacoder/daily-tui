@@ -7,7 +7,8 @@
 # Subcomandos:
 #   check          (default) — testa cada painel e mostra PASS/FAIL. NÃO altera nada.
 #   email          — configura ortie + himalaya (Gmail/Workspace via OAuth2)
-#   google         — configura gcalcli (agenda) + gtasks (tarefas) via OAuth do GCP
+#   google         — configura gcalcli (agenda) via OAuth do GCP
+#   mstodo         — configura mstodo (tarefas) via Microsoft To Do
 #   all            — email, depois google, depois check
 #
 # Flags:
@@ -57,7 +58,7 @@ probe() {
 doctor() {
   step "Diagnóstico das autenticações (painéis do daily-tui)"
   echo "    CLIs no PATH:"
-  for c in himalaya gcalcli ghpending jirapending gtasks ortie secret-tool jq; do
+  for c in himalaya gcalcli ghpending jirapending mstodo ortie secret-tool jq; do
     have "$c" && printf "      ${G}✓${X} %s\n" "$c" || printf "      ${R}✗${X} %s (ausente)\n" "$c"
   done
   echo
@@ -75,8 +76,8 @@ doctor() {
     "defina GITHUB_TOKEN e rode: ghpending add"
   probe "jira (jirapending)" "jirapending" \
     "defina JIRA_EMAIL / JIRA_CLOUD / JIRA_TOKEN"
-  probe "tasks (gtasks)" "gtasks list" \
-    "rode: scripts/setup-auth.sh google (gtasks auth)"
+  probe "tasks (mstodo)" "mstodo list" \
+    "rode: scripts/setup-auth.sh mstodo"
 }
 
 # ----------------------------------------------------------------- email ----
@@ -129,19 +130,23 @@ setup_email() {
 
 # ---------------------------------------------------------------- google ----
 setup_google() {
-  step "Agenda (gcalcli) + Tarefas (gtasks) via OAuth do Google Cloud"
+  step "Agenda (gcalcli) via OAuth do Google Cloud"
   have gcalcli || die "gcalcli ausente — rode scripts/install.sh"
   have jq || die "jq ausente — rode scripts/install.sh"
 
   cat <<'EOF'
     Pré-requisito MANUAL (uma vez, no Google Cloud Console):
       1. Crie/escolha um projeto em https://console.cloud.google.com
-      2. Habilite as APIs: "Google Calendar API" e "Google Tasks API"
+      2. Habilite a API: "Google Calendar API"
       3. APIs & Services > Credentials > Create OAuth client ID > tipo "Desktop app"
       4. Baixe o JSON do client.
 EOF
-  # Reusa o client já salvo, se houver (re-runs não precisam reinformar o caminho).
-  local default_secret="$HOME/.config/daily-tui/gtasks-client-secret.json"
+  # Client OAuth compartilhado da agenda (gcalcli). O nome antigo
+  # (gtasks-client-secret.json) é aceito para não quebrar instalações existentes.
+  local secret_dir="$HOME/.config/daily-tui"
+  local default_secret="$secret_dir/google-client-secret.json"
+  [[ -f "$default_secret" ]] || [[ ! -f "$secret_dir/gtasks-client-secret.json" ]] \
+    || default_secret="$secret_dir/gtasks-client-secret.json"
   local secret
   if [[ -f "$default_secret" ]]; then
     info "Já existe um client salvo. Enter aceita; ou informe outro caminho."
@@ -164,19 +169,36 @@ EOF
       || warn "gcalcli auth ($dir) falhou — repita depois"
   done
 
-  # gtasks — guarda o client secret no caminho padrão e autoriza
-  step "gtasks — Google Tasks (conta pessoal)"
-  local gt_secret="$HOME/.config/daily-tui/gtasks-client-secret.json"
-  mkdir -p "$(dirname "$gt_secret")"
-  cp "$secret" "$gt_secret"
-  info "client secret copiado para $gt_secret"
-  gtasks auth || warn "gtasks auth falhou — repita depois"
+  # Guarda o client no caminho padrão, para o google-auth.ps1 e re-runs.
+  mkdir -p "$secret_dir"
+  cp "$secret" "$default_secret"
+  info "client OAuth salvo em $default_secret"
 
   step "Validando Google"
   for dir in "${GCAL_DIRS[@]}"; do
     probe "agenda:$dir" "XDG_DATA_HOME=$GCAL_ROOT/$dir gcalcli list" "refaça o auth desta conta"
   done
-  probe "tasks (gtasks)" "gtasks list" "refaça: gtasks auth"
+}
+
+# ---------------------------------------------------------------- mstodo ----
+setup_mstodo() {
+  step "Tarefas (mstodo) — Microsoft To Do, conta pessoal"
+  have mstodo || die "mstodo ausente — rode scripts/install.sh"
+  [[ -n "${DAILY_TUI_TODO_CLIENT_ID:-}" ]] \
+    || die "defina DAILY_TUI_TODO_CLIENT_ID (veja scripts/daily-tui.env.example)"
+
+  cat <<'EOF'
+    Pré-requisito MANUAL (uma vez, no portal Entra):
+      1. App registrations > New registration
+      2. Supported account types: "Personal Microsoft accounts only"
+      3. Authentication > Allow public client flows: Yes
+      4. API permissions > Microsoft Graph > Delegated > Tasks.ReadWrite
+      5. Copie o Application (client) ID para DAILY_TUI_TODO_CLIENT_ID
+EOF
+  mstodo auth || warn "mstodo auth falhou — repita depois"
+
+  step "Validando tarefas"
+  probe "tasks (mstodo)" "mstodo list" "refaça: mstodo auth"
 }
 
 # -------------------------------------------------------------------- main --
@@ -184,7 +206,7 @@ CMD="check"
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
-    check|email|google|all) CMD="$a" ;;
+    check|email|google|mstodo|all) CMD="$a" ;;
     --help|-h) awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) die "argumento desconhecido: $a" ;;
   esac
@@ -194,5 +216,6 @@ case "$CMD" in
   check)  doctor ;;
   email)  setup_email ;;
   google) setup_google ;;
-  all)    setup_email; echo; setup_google; echo; doctor ;;
+  mstodo) setup_mstodo ;;
+  all)    setup_email; echo; setup_google; echo; setup_mstodo; echo; doctor ;;
 esac

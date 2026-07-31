@@ -7,7 +7,7 @@
 #   3. `cargo install` do himalaya e do ghpending;
 #   4. `uv tool install` do gcalcli;
 #   5. compila o daily-tui em release e linka em ~/.local/bin;
-#   6. copia os helpers jirapending e gtasks para ~/.local/bin.
+#   6. copia os helpers jirapending e mstodo para ~/.local/bin.
 #
 # NÃO configura credenciais (contas de e-mail, OAuth do Google, token do Jira):
 # isso é manual e está documentado no README.md ("Configuração das contas").
@@ -133,10 +133,10 @@ build_daily_tui() {
 }
 
 install_helpers() {
-  step "Instalando helpers (jirapending, gtasks)"
+  step "Instalando helpers (jirapending, mstodo)"
   mkdir -p "$BIN_DIR"
   install -m 0755 "$SCRIPT_DIR/jirapending" "$BIN_DIR/jirapending"
-  install -m 0755 "$SCRIPT_DIR/gtasks"      "$BIN_DIR/gtasks"
+  install -m 0755 "$SCRIPT_DIR/mstodo"      "$BIN_DIR/mstodo"
   info "copiados para $BIN_DIR"
 }
 
