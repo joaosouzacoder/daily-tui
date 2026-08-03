@@ -87,10 +87,13 @@ Garanta que `~/.local/bin` e `~/.cargo/bin` estão no seu `PATH` (o script avisa
 > (que já entra no `PATH`, e é de lá que o daily-tui os invoca por nome via
 > `cmd /C`):
 > ```
-> copy scripts\mstodo scripts\mstodo.cmd %USERPROFILE%\.local\bin\
+> if not exist "%USERPROFILE%\.local\bin" mkdir "%USERPROFILE%\.local\bin"
+> copy scripts\mstodo* %USERPROFILE%\.local\bin\
 > ```
 > Os dois arquivos são necessários — o `.cmd` localiza o script Python irmão
-> pelo `%~dp0`.
+> pelo `%~dp0`. (O `copy` do `cmd` não aceita múltiplas origens soltas — só
+> concatenação com `+` — por isso o `*`; o `mkdir` evita o `copy` criar um
+> arquivo chamado `bin` se a pasta ainda não existir.)
 
 ---
 
@@ -178,7 +181,8 @@ O script:
 > O client público do Thunderbird funciona para qualquer `@gmail.com` e para
 > Google Workspace — **a menos que o admin do Workspace bloqueie apps OAuth de
 > terceiros**. Se o login da conta de trabalho for barrado, fale com o admin ou
-> use um OAuth client próprio (mesma ideia do mundo "agenda/tarefas").
+> use um OAuth client próprio (mesma ideia da seção de Agenda, que já usa um
+> OAuth client seu no Google Cloud).
 >
 > Workspace em outro idioma? Ajuste `folder.aliases.*` no
 > `~/.config/himalaya/config.toml` (os nomes das pastas do Gmail mudam por idioma).
