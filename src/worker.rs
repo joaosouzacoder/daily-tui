@@ -19,7 +19,7 @@ pub enum WorkerCmd {
     RefreshAll,
     /// Busca o corpo de um e-mail para o overlay de detalhe.
     ReadEmail { account: Account, id: String },
-    /// Escrita no Google Tasks; após executar, re-busca a lista.
+    /// Escrita no Microsoft To Do; após executar, re-busca a lista.
     TaskComplete(String),
     TaskReopen(String),
     TaskAdd(String),
@@ -72,7 +72,7 @@ fn refresh_all(ui: &ProgramHandle<Msg>) {
     let _ = ui.send(Msg::TasksLoaded(tasks::fetch()));
 }
 
-/// Aplica uma escrita no Google Tasks e re-busca a lista. Se a escrita falhar,
+/// Aplica uma escrita no Microsoft To Do e re-busca a lista. Se a escrita falhar,
 /// propaga o erro para o painel; senão, manda a lista atualizada.
 fn mutate_tasks(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
     let loaded = result.and_then(|()| tasks::fetch());

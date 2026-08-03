@@ -19,7 +19,7 @@ pub enum Msg {
     PullsLoaded(Result<Vec<String>, String>),
     /// Resultado da busca de tickets do Jira (linhas do jirapending).
     JiraLoaded(Result<Vec<String>, String>),
-    /// Resultado da busca/escrita de tarefas (lista do gtasks, já atualizada).
+    /// Resultado da busca/escrita de tarefas (lista do mstodo, já atualizada).
     TasksLoaded(Result<Vec<TaskItem>, String>),
     /// Corpo de um e-mail aberto no overlay de detalhe.
     EmailBody(Result<String, String>),

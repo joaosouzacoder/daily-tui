@@ -12,7 +12,7 @@ pub use tasks::TaskItem;
 
 /// Cria um `Command` para um helper externo, tratando a diferença do Windows.
 ///
-/// No Windows, `jirapending` e `gtasks` são shims `.cmd` — e o `CreateProcess`
+/// No Windows, `jirapending` e `mstodo` são shims `.cmd` — e o `CreateProcess`
 /// (usado por `Command`) só executa `.exe` diretamente, então rodamos via
 /// `cmd /C`. As CLIs `.exe` (himalaya/gcalcli/ghpending) chamam direto e não
 /// passam por aqui. No Unix é sempre exec direto.
@@ -29,7 +29,7 @@ pub fn helper_command(program: &str) -> std::process::Command {
     }
 }
 
-/// Força as CLIs escritas em Python (`gcalcli`, `gtasks`) a emitir UTF-8.
+/// Força as CLIs escritas em Python (`gcalcli`, `mstodo`) a emitir UTF-8.
 ///
 /// Com o stdout num pipe o Python não usa UTF-8, e sim a codificação de locale
 /// — no Windows, a ANSI code page (cp1252 nesta máquina). Aí "Escritório" sai
