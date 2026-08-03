@@ -8,7 +8,7 @@
 #
 # Os e-mails de cada conta vem de daily-tui.config.ps1.
 #
-# Uso:  google-auth.ps1              # work + personal (+ tasks se faltar)
+# Uso:  google-auth.ps1              # work + personal (agenda)
 #       google-auth.ps1 personal     # so a(s) conta(s) indicada(s): work|personal
 param([string[]]$Accounts = @('work', 'personal'))
 $ErrorActionPreference = 'Continue'
@@ -24,9 +24,11 @@ if (-not (Test-Path $config)) {
 . $config
 $emails = @{ work = $WorkEmail; personal = $PersonalEmail }
 
-$secret = "$env:USERPROFILE\.config\daily-tui\gtasks-client-secret.json"
+$secretDir = "$env:USERPROFILE\.config\daily-tui"
+$secret = "$secretDir\google-client-secret.json"
+if (-not (Test-Path $secret)) { $secret = "$secretDir\gtasks-client-secret.json" }
 if (-not (Test-Path $secret)) {
-    Write-Error "client secret nao encontrado: $secret"
+    Write-Error "client secret nao encontrado em $secretDir (google-client-secret.json)"
     exit 1
 }
 $c = (Get-Content $secret -Raw | ConvertFrom-Json).installed
@@ -48,18 +50,6 @@ foreach ($acc in $Accounts) {
     New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
     Move-Item $canonical $dst -Force
     Write-Host "   token [$acc] salvo em $dst" -ForegroundColor DarkGray
-}
-
-# Tarefas: token proprio (gtasks usa caminhos explicitos, sem platformdirs).
-$gtasksToken = "$env:USERPROFILE\.local\share\daily-tui\gtasks-personal.json"
-if (Test-Path $gtasksToken) {
-    Write-Host ""
-    Write-Host "Tarefas (gtasks) ja autenticado." -ForegroundColor DarkGray
-}
-else {
-    Write-Host ""
-    Write-Host ">> Tarefas (gtasks) - faca login no navegador com: $($emails['personal'])" -ForegroundColor Green
-    & gtasks auth
 }
 
 Write-Host ""

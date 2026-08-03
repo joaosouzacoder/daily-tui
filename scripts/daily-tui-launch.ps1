@@ -74,6 +74,8 @@ $env:DAILY_TUI_WORK_EMAIL     = $WorkEmail
 $env:DAILY_TUI_PERSONAL_EMAIL = $PersonalEmail
 $env:JIRA_EMAIL = $JiraEmail
 $env:JIRA_CLOUD = $JiraCloud
+$env:DAILY_TUI_TODO_CLIENT_ID = $TodoClientId
+$env:DAILY_TUI_TODO_LIST      = $TodoList
 if ($jira) { $env:JIRA_TOKEN = $jira }
 if ($gh)   { $env:GITHUB_TOKEN = $gh }
 

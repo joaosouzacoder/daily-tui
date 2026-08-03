@@ -13,6 +13,12 @@ $PersonalEmail = 'voce@gmail.com'
 $JiraEmail = 'voce-work@suaempresa.com'
 $JiraCloud = 'suaempresa.atlassian.net'   # com ou sem https://
 
+# --- Microsoft To Do (tarefas) -----------------------------------------------
+# Application (client) ID do app registration (portal Entra, conta pessoal).
+$TodoClientId = '00000000-0000-0000-0000-000000000000'
+# Nome da lista do To Do; vazio = lista padrao ("Tarefas").
+$TodoList     = ''
+
 # --- Tokens via 1Password (referencia op://vault/item/campo + conta) ---------
 # O launcher le esses segredos com `op read` e guarda em cache DPAPI local.
 $JiraTokenRef    = 'op://Vault/Token Jira/credential'
