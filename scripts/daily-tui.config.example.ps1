@@ -14,8 +14,9 @@ $JiraEmail = 'voce-work@suaempresa.com'
 $JiraCloud = 'suaempresa.atlassian.net'   # com ou sem https://
 
 # --- Microsoft To Do (tarefas) -----------------------------------------------
-# Application (client) ID do app registration (portal Entra, conta pessoal).
-$TodoClientId = '00000000-0000-0000-0000-000000000000'
+# Client publico first-party da Microsoft ("Microsoft Graph Command Line Tools"),
+# autorizado por device code - nao exige app registration proprio.
+$TodoClientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 # Nome da lista do To Do; vazio = lista padrao ("Tarefas").
 $TodoList     = ''
 

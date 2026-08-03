@@ -188,12 +188,14 @@ setup_mstodo() {
     || die "defina DAILY_TUI_TODO_CLIENT_ID (veja scripts/daily-tui.env.example)"
 
   cat <<'EOF'
-    Pré-requisito MANUAL (uma vez, no portal Entra):
-      1. App registrations > New registration
-      2. Supported account types: "Personal Microsoft accounts only"
-      3. Authentication > Allow public client flows: Yes
-      4. API permissions > Microsoft Graph > Delegated > Tasks.ReadWrite
-      5. Copie o Application (client) ID para DAILY_TUI_TODO_CLIENT_ID
+    O client padrão do daily-tui.env.example é o client público first-party da
+    Microsoft e não exige nenhum cadastro. O passo a seguir abre o device code:
+    você digita o código exibido em https://www.microsoft.com/link.
+
+    Plano B (só se o escopo Tasks.ReadWrite for restringido nesse client):
+      registre um app no portal Entra — Personal Microsoft accounts only,
+      "Allow public client flows: Yes", permissão delegada Tasks.ReadWrite —
+      e troque DAILY_TUI_TODO_CLIENT_ID pelo Application (client) ID dele.
 EOF
   mstodo auth || warn "mstodo auth falhou — repita depois"
 
