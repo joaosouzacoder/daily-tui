@@ -22,17 +22,24 @@
 - Comentários e mensagens do código em português, como o resto do repo.
 - Ao final: `cargo test` e `cargo clippy --all-targets` sem regressão (a base tem 3 warnings pré-existentes em `app.rs:115`, `app.rs:119` e `email.rs:90` — não corrigir aqui).
 
-## Pré-requisito manual (João, uma vez)
+## Pré-requisito manual — RESOLVIDO de outra forma (2026-08-03)
 
-Antes da Task 1, criar o app registration no portal Entra:
+O plano pedia um app registration próprio no portal Entra. O login no portal
+falhou com `AADSTS500121` (MFA de tenant recusando a conta pessoal), então o
+client em uso é o first-party público da Microsoft
+`14d82eec-204b-4c2f-b7e8-296a70dab67e` ("Microsoft Graph Command Line Tools"),
+autorizado por device code. Ver a seção "Autenticação" do spec para o trade-off
+e para o roteiro do portal como plano B.
 
-1. *App registrations* → **New registration**, nome livre (ex.: `daily-tui`);
-2. *Supported account types*: **Personal Microsoft accounts only**;
-3. *Authentication* → **Allow public client flows: Yes**;
-4. *API permissions* → Microsoft Graph → **Delegated** → **Tasks.ReadWrite**;
-5. copiar o **Application (client) ID** e exportar como `DAILY_TUI_TODO_CLIENT_ID`.
+Consequência para a execução: `mstodo auth` **já foi rodado com sucesso** e o
+cache existe em `<home>/.local/share/daily-tui/mstodo-personal.json`. Toda
+invocação precisa exportar aquele client id — o cache de token está atrelado a
+ele.
 
-Sem client secret — é public client com device code.
+Consequência para os artefatos já entregues: `daily-tui.env.example`,
+`daily-tui.config.example.ps1` e o roteiro impresso por `setup_mstodo` no
+`setup-auth.sh` ainda mandam criar um app registration. A **Task 6** alinha
+esses três com a realidade.
 
 ## File Structure
 
@@ -790,9 +797,104 @@ git commit -m "chore(tasks): drop gtasks and document the Microsoft To Do setup"
 
 ---
 
+---
+
+### Task 6: Alinhar a documentação de auth com o client em uso
+
+Acrescentada em 2026-08-03. As Tasks 3 e 4 documentaram o caminho do app
+registration, que não foi o adotado. Deliverable: nenhum arquivo instrui o
+usuário a criar um app quando o padrão é o client público.
+
+**Files:**
+- Modify: `scripts/daily-tui.env.example` (seção do To Do)
+- Modify: `scripts/daily-tui.config.example.ps1` (seção do To Do)
+- Modify: `scripts/setup-auth.sh` (o heredoc de `setup_mstodo`)
+
+**Interfaces:**
+- Consumes: a decisão de auth registrada no spec.
+- Produces: nada que outra task consuma.
+
+- [ ] **Step 1: `daily-tui.env.example`**
+
+Trocar a seção do To Do por: o client público como valor padrão e comentado o
+motivo, com o roteiro do portal reduzido a uma linha de "plano B".
+
+```bash
+# --- Microsoft To Do (mstodo) ---------------------------------------------
+# Client publico first-party da Microsoft ("Microsoft Graph Command Line
+# Tools"), autorizado por device code — nao exige app registration proprio.
+export DAILY_TUI_TODO_CLIENT_ID="14d82eec-204b-4c2f-b7e8-296a70dab67e"
+# Plano B, se a Microsoft restringir Tasks.ReadWrite nesse client: registre um
+# app proprio no portal Entra (Personal Microsoft accounts only, public client
+# flows habilitado, permissao delegada Tasks.ReadWrite) e ponha o client id aqui.
+# Nome da lista do To Do; vazio ou ausente = lista padrão ("Tarefas").
+# export DAILY_TUI_TODO_LIST="Trabalho"
+# Cache de token (default: ~/.local/share/daily-tui/mstodo-personal.json)
+# export MSTODO_TOKEN="$HOME/.local/share/daily-tui/mstodo-personal.json"
+```
+
+- [ ] **Step 2: `daily-tui.config.example.ps1`**
+
+Mesmo tratamento, em ASCII puro (o arquivo é lido como ANSI pelo PowerShell 5.1):
+
+```powershell
+# --- Microsoft To Do (tarefas) -----------------------------------------------
+# Client publico first-party da Microsoft ("Microsoft Graph Command Line Tools"),
+# autorizado por device code — nao exige app registration proprio.
+$TodoClientId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+# Nome da lista do To Do; vazio = lista padrao ("Tarefas").
+$TodoList     = ''
+```
+
+- [ ] **Step 3: o heredoc de `setup_mstodo` no `setup-auth.sh`**
+
+Hoje imprime os cinco passos do portal como pré-requisito obrigatório. Passa a
+dizer que o padrão do `daily-tui.env.example` já serve e que o `auth` é
+device code; o portal vira nota de plano B. Manter o `die` que exige
+`DAILY_TUI_TODO_CLIENT_ID`, porque a variável continua obrigatória.
+
+```bash
+  cat <<'EOF'
+    O client padrão do daily-tui.env.example é o client público first-party da
+    Microsoft e não exige nenhum cadastro. O passo a seguir abre o device code:
+    você digita o código exibido em https://www.microsoft.com/link.
+
+    Plano B (só se o escopo Tasks.ReadWrite for restringido nesse client):
+      registre um app no portal Entra — Personal Microsoft accounts only,
+      "Allow public client flows: Yes", permissão delegada Tasks.ReadWrite —
+      e troque DAILY_TUI_TODO_CLIENT_ID pelo Application (client) ID dele.
+EOF
+```
+
+- [ ] **Step 4: Verificar**
+
+```bash
+bash -n scripts/setup-auth.sh && echo "sintaxe ok"
+grep -rn "App registrations\|app registration" scripts/
+python -c "
+for f in ['scripts/daily-tui.config.example.ps1']:
+    b=open(f,'rb').read()
+    bad=[i for i,c in enumerate(b) if c>127]
+    print(f, 'nao-ASCII:', len(bad))
+"
+```
+
+Esperado: `sintaxe ok`; o grep só encontra menções na forma de plano B; zero
+bytes não-ASCII no `.ps1`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/daily-tui.env.example scripts/daily-tui.config.example.ps1 scripts/setup-auth.sh
+git commit -m "docs(setup): default to the public Graph client for To Do auth"
+```
+
+---
+
 ## Ordem e dependências
 
-1. **Task 1** (helper) — independente, mas precisa do app registration criado antes.
+1. **Task 1** (helper) — independente; o `auth` foi resolvido com o client público (ver acima).
 2. **Task 2** (Rust) — depende da Task 1 (usa a saída real no teste).
 3. **Task 3** (Linux) e **Task 4** (Windows) — independentes entre si, ambas depois da Task 1.
-4. **Task 5** (remoção + README) — por último, porque o gate é o grep vazio.
+4. **Task 5** (remoção + README) — depois da Task 2, porque o gate é o grep vazio e a última referência a `gtasks` sai em `tasks.rs`.
+5. **Task 6** (doc de auth) — por último; corrige o que as Tasks 3 e 4 escreveram antes da decisão mudar.

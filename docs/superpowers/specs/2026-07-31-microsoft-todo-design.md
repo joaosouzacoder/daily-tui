@@ -105,16 +105,33 @@ configurado difere do gravado ou quando o id devolve 404.
 
 ## Autenticação
 
-Conta pessoal Microsoft. O Graph não tem client público reutilizável para o To
-Do, então o app registration é seu — passo único no portal Entra:
+Conta pessoal Microsoft, sem client secret: public client com device code.
+
+**Decisão revista em 2026-08-03.** O plano original pedia um app registration
+próprio. Na prática o login no portal Entra falhou com `AADSTS500121` — desafio
+de MFA recusado por política de *tenant*, porque o portal autentica a conta
+pessoal contra um diretório no qual ela é convidada. Recuperar esse acesso é
+problema da conta, não do projeto.
+
+O device code flow autentica no endpoint de consumidor e não passa por tenant
+nenhum. Então o client em uso é o **first-party público da Microsoft**
+`14d82eec-204b-4c2f-b7e8-296a70dab67e` ("Microsoft Graph Command Line Tools") —
+o mesmo arranjo que o himalaya já usa neste projeto com o client público do
+Thunderbird para o Gmail.
+
+O trade-off, explícito: o client não é nosso. Se a Microsoft restringir
+`Tasks.ReadWrite` nele, o painel para e o caminho passa a ser um registro
+próprio. Nada no código depende de qual dos dois foi usado — o client id sempre
+vem de `DAILY_TUI_TODO_CLIENT_ID` — mas trocar de client invalida o cache de
+token e exige rodar `mstodo auth` de novo.
+
+O roteiro do portal fica registrado como plano B:
 
 1. *App registrations* → **New registration**;
 2. *Supported account types*: **Personal Microsoft accounts only**;
 3. *Authentication* → **Allow public client flows: Yes** (necessário para device code);
 4. *API permissions* → Microsoft Graph → **Delegated** → **Tasks.ReadWrite** → *Grant consent* (só para você);
 5. copiar o **Application (client) ID** para `DAILY_TUI_TODO_CLIENT_ID`.
-
-Sem client secret: é public client com device code.
 
 - **Authority:** `https://login.microsoftonline.com/consumers`
 - **Escopo:** `Tasks.ReadWrite` (o MSAL acrescenta `offline_access`, `openid`, `profile`)
@@ -189,8 +206,12 @@ renomear não serve a nada aqui.
 
 ## Riscos
 
-- **App registration bloqueado ou escopo negado.** Mitigação: conta pessoal, sem
-  admin no caminho; o passo 4 do roteiro é consentimento só para você.
+- **App registration bloqueado.** Materializou-se: o portal Entra recusou o login
+  da conta pessoal (`AADSTS500121`). Contornado com o client público
+  first-party; ver "Autenticação".
+- **Client público restringido pela Microsoft.** É de terceiro, não nosso. Se o
+  escopo `Tasks.ReadWrite` deixar de ser consentível nele, o painel para. Saída:
+  registrar um app próprio (plano B documentado) e rodar `mstodo auth` de novo.
 - **Nome de lista com acento ou renomeado.** O cache sidecar detecta divergência
   pelo nome e re-resolve; se o nome não existir mais, o erro diz qual lista faltou.
 - **Limite de requisições do Graph.** O painel recarrega periodicamente e cada
