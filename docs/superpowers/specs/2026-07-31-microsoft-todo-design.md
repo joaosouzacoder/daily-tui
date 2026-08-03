@@ -135,7 +135,7 @@ O roteiro do portal fica registrado como plano B:
 
 - **Authority:** `https://login.microsoftonline.com/consumers`
 - **Escopo:** `Tasks.ReadWrite` (o MSAL acrescenta `offline_access`, `openid`, `profile`)
-- **Fluxo:** `initiate_device_flow` → imprime o código para digitar em `microsoft.com/devicelogin` → `acquire_token_by_device_flow`
+- **Fluxo:** `initiate_device_flow` → imprime o código para digitar em `https://www.microsoft.com/link` (a URL que o MSAL de fato devolveu na autorização de 2026-08-03; não `devicelogin`, como este documento dizia antes) → `acquire_token_by_device_flow`
 - **Renovação:** `acquire_token_silent` usa o refresh token do cache
 - **Cache:** `msal.SerializableTokenCache` em `<home>/.local/share/daily-tui/mstodo-personal.json`, `chmod 0600` no Unix
 

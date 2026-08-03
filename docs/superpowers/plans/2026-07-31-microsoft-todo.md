@@ -350,7 +350,7 @@ export DAILY_TUI_TODO_CLIENT_ID="<client id do app registration>"
 uv run --script scripts/mstodo auth
 ```
 
-Esperado: imprime a instrução com o código; após digitar em `microsoft.com/devicelogin`, termina com `ok — token salvo em ...`. No Windows: `scripts\mstodo.cmd auth`.
+Esperado: imprime a instrução com o código; após digitar em `https://www.microsoft.com/link` (a URL que o MSAL devolve), termina com `ok — token salvo em ...`. No Windows: `scripts\mstodo.cmd auth`.
 
 - [ ] **Step 5: Smoke test dos sete subcomandos**
 
