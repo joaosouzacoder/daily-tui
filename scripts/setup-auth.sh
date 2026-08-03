@@ -171,7 +171,7 @@ EOF
 
   # Guarda o client no caminho padrão, para o google-auth.ps1 e re-runs.
   mkdir -p "$secret_dir"
-  cp "$secret" "$default_secret"
+  [[ "$secret" -ef "$default_secret" ]] || cp "$secret" "$default_secret"
   info "client OAuth salvo em $default_secret"
 
   step "Validando Google"
