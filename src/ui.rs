@@ -11,7 +11,9 @@ use crate::ansi;
 use crate::app::{App, InputKind, Panel, Prompt};
 use crate::clock;
 use chrono::Datelike;
-use crate::data::{AgendaItem, TaskItem};
+use crate::data::jira::{self, JiraItem};
+use crate::data::tasks::{self, SubTask};
+use crate::data::{email, AgendaItem, TaskItem};
 
 /// Calcula o deslocamento de rolagem para manter o cursor visível.
 ///
@@ -149,6 +151,7 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
     if render_empty_state(frame, app, inner, p) {
         return;
     }
+    let inner = reserve_error_banner(frame, theme, inner, p);
     // Segue o cursor (seleção).
     let height = inner.height as usize;
     let off = window(lines.len(), p.cursor, p.offset.get(), height);
@@ -168,6 +171,7 @@ fn render_agenda(app: &App, frame: &mut Frame<'_>, area: Rect) {
     if render_empty_state(frame, app, inner, p) {
         return;
     }
+    let inner = reserve_error_banner(frame, theme, inner, p);
     render_scrolled(frame, theme, inner, lines, &p.scroll);
 }
 
@@ -184,23 +188,81 @@ fn render_pulls(app: &App, frame: &mut Frame<'_>, area: Rect) {
     if render_empty_state(frame, app, inner, p) {
         return;
     }
+    let inner = reserve_error_banner(frame, theme, inner, p);
     render_scrolled(frame, theme, inner, lines, &p.scroll);
 }
 
 fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
-    let p = &app.jira;
-    let title = " JIRA (jirapending) ".to_string();
+    let (p, rows) = match app.jira_view {
+        jira::JiraView::Issues => (&app.jira, jira::rows_by_project(&app.jira.items)),
+        jira::JiraView::ByParent => (&app.jira, jira::rows_by_parent(&app.jira.items)),
+        jira::JiraView::Mentions => (
+            &app.jira_mentions,
+            jira::rows_by_project(&app.jira_mentions.items),
+        ),
+    };
+    let title = format!(
+        " JIRA · {} · {} ",
+        app.jira_filter.label(),
+        match app.jira_view {
+            jira::JiraView::Issues => "[issues] por-pai menções",
+            jira::JiraView::ByParent => "issues [por-pai] menções",
+            jira::JiraView::Mentions => "issues por-pai [menções]",
+        }
+    );
     let focused = app.focus == Panel::Jira;
+    // O papel só explica algo no filtro `ambas`: nos outros, toda issue tem o
+    // mesmo papel; em menções, a issue está ali por citação, não por papel.
+    let show_role = app.jira_filter == jira::JiraFilter::Both && app.jira_view != jira::JiraView::Mentions;
 
-    // Reaplica as cores ANSI que o jirapending emite.
-    let lines: Vec<Line> = p.items.iter().map(|l| ansi::to_line(l, theme.text)).collect();
+    let selected = focused.then_some(p.cursor);
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|row| match row {
+            jira::JiraRow::Header(h) => {
+                Line::from(Span::styled(h.clone(), theme.accent.add_modifier(Modifier::BOLD)))
+            }
+            jira::JiraRow::Issue(i) => {
+                let item = &p.items[*i];
+                highlight(issue_line(item, theme, show_role), theme, selected == Some(*i))
+            }
+        })
+        .collect();
 
     let inner = panel_inner(frame, theme, area, title, focused);
     if render_empty_state(frame, app, inner, p) {
         return;
     }
-    render_scrolled(frame, theme, inner, lines, &p.scroll);
+    let inner = reserve_error_banner(frame, theme, inner, p);
+    // A rolagem segue o cursor, mas em linhas — o cursor indexa issues.
+    let height = inner.height as usize;
+    let cursor_row = jira::row_of_item(&rows, p.cursor);
+    let off = window(lines.len(), cursor_row, p.offset.get(), height);
+    p.offset.set(off);
+    render_lines(frame, theme, inner, lines, off);
+}
+
+/// Linha de uma issue: chave, status esmaecido, papel (opcional) e resumo.
+///
+/// `show_role` só é verdadeiro no filtro `ambas` fora da visão de menções —
+/// nos outros casos o papel não distingue nada, e mostrá-lo seria ruído.
+fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool) -> Line<'static> {
+    let mut spans = vec![
+        theme.span("  "),
+        theme.accent(item.key.clone()),
+        theme.muted(format!(" [{}] ", item.status)),
+    ];
+    // O marcador ("[AR] ") ocupa 5 colunas; o clip do resumo encurta na mesma
+    // medida para a linha não vazar do painel.
+    let summary_width = if show_role {
+        spans.push(theme.muted(format!("{} ", item.role.marker())));
+        44 - 5
+    } else {
+        44
+    };
+    spans.push(theme.span(clip(&item.summary, summary_width)));
+    Line::from(spans)
 }
 
 fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -210,18 +272,32 @@ fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let title = format!(" TAREFAS  {}/{} ", pending, p.items.len());
     let focused = app.focus == Panel::Tasks;
 
+    // O cursor indexa linhas, e uma linha é uma tarefa ou uma subtarefa de uma
+    // tarefa expandida — por isso o achatamento vem antes da renderização.
+    let rows = tasks::rows(&p.items, &app.tasks_expanded);
     let selected = focused.then_some(p.cursor);
-    let lines: Vec<Line> = p
-        .items
+    let lines: Vec<Line> = rows
         .iter()
         .enumerate()
-        .map(|(i, t)| highlight(task_line(t, theme), theme, selected == Some(i)))
+        .map(|(row, kind)| {
+            let line = match kind {
+                tasks::TaskRow::Task(t) => {
+                    let item = &p.items[*t];
+                    task_line(item, theme, app.tasks_expanded.contains(&item.id))
+                }
+                tasks::TaskRow::Sub { task, sub } => {
+                    subtask_line(&p.items[*task].subtasks[*sub], theme)
+                }
+            };
+            highlight(line, theme, selected == Some(row))
+        })
         .collect();
 
     let inner = panel_inner(frame, theme, area, title, focused);
     if render_empty_state(frame, app, inner, p) {
         return;
     }
+    let inner = reserve_error_banner(frame, theme, inner, p);
     // Segue o cursor (seleção), igual ao painel de e-mails.
     let height = inner.height as usize;
     let off = window(lines.len(), p.cursor, p.offset.get(), height);
@@ -229,18 +305,51 @@ fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
     render_lines(frame, theme, inner, lines, off);
 }
 
-/// Linha de uma tarefa: checkbox + título (concluídas esmaecidas) + prazo.
-fn task_line(t: &TaskItem, theme: &BubbleTheme) -> Line<'static> {
-    let mut spans = if t.completed {
-        vec![theme.muted("[x] "), theme.muted(clip(&t.title, 40))]
+/// Linha de uma tarefa: marca de expansão + checkbox + título + prazo.
+///
+/// A marca indica que há subtarefas escondidas: `▸` recolhida, `▾` expandida.
+/// Tarefa sem subtarefas não recebe marca, para não prometer o que não existe.
+fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool) -> Line<'static> {
+    let mark = if t.subtasks.is_empty() {
+        "  "
+    } else if expanded {
+        "▾ "
     } else {
-        vec![theme.span("[ ] "), theme.span(clip(&t.title, 40))]
+        "▸ "
+    };
+    let mut spans = if t.completed {
+        vec![
+            theme.muted(mark),
+            theme.muted("[x] "),
+            theme.muted(clip(&t.title, 38)),
+        ]
+    } else {
+        vec![
+            theme.muted(mark),
+            theme.span("[ ] "),
+            theme.span(clip(&t.title, 38)),
+        ]
     };
     if !t.due.is_empty() {
         spans.push(theme.muted("  "));
         spans.push(theme.accent(short_date(&t.due)));
     }
     Line::from(spans)
+}
+
+/// Linha de uma subtarefa: indentada sob a tarefa, com o mesmo checkbox.
+fn subtask_line(s: &SubTask, theme: &BubbleTheme) -> Line<'static> {
+    if s.completed {
+        Line::from(vec![
+            theme.muted("      [x] "),
+            theme.muted(clip(&s.title, 34)),
+        ])
+    } else {
+        Line::from(vec![
+            theme.span("      [ ] "),
+            theme.span(clip(&s.title, 34)),
+        ])
+    }
 }
 
 /// Overlay do prompt de tarefa (entrada de texto ou confirmação de exclusão).
@@ -270,9 +379,39 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 Line::from(theme.muted("y: confirmar · n/Esc: cancelar")),
             ],
         ),
+        Prompt::PickFolder { cursor, .. } => {
+            let mut lines = vec![Line::from(theme.muted("Mover para:")), Line::from("")];
+            lines.extend(email::FOLDERS.iter().enumerate().map(|(i, folder)| {
+                highlight(
+                    Line::from(vec![theme.span(format!("  {folder}"))]),
+                    theme,
+                    i == *cursor,
+                )
+            }));
+            lines.push(Line::from(""));
+            lines.push(Line::from(theme.muted(
+                "j/k: escolher · Enter: mover · Esc: cancelar",
+            )));
+            (" Mover e-mail ".to_string(), lines)
+        }
+        Prompt::ConfirmEmailDelete { subject, .. } => (
+            " Excluir e-mail ".to_string(),
+            vec![
+                Line::from(vec![
+                    theme.muted("Mover para a Lixeira: \""),
+                    theme.span(clip(subject, 36)),
+                    theme.muted("\"?"),
+                ]),
+                Line::from(""),
+                Line::from(theme.muted("y: confirmar · n/Esc: cancelar")),
+            ],
+        ),
     };
 
-    let popup = centered_rect(60, 24, area);
+    // O seletor de pasta tem 10 linhas (título, seis pastas, espaçamento, ajuda);
+    // os outros prompts cabem em 24% da tela.
+    let height = if matches!(prompt, Prompt::PickFolder { .. }) { 46 } else { 24 };
+    let popup = centered_rect(60, height, area);
     frame.render_widget(Clear, popup);
     let block = theme.titled_modal_block(title);
     let inner = block.inner(popup);
@@ -349,6 +488,26 @@ fn render_empty_state<T>(frame: &mut Frame<'_>, app: &App, inner: Rect, p: &crat
     true
 }
 
+/// Quando o painel já tem itens (dados de uma busca anterior) mas a busca mais
+/// recente falhou, reserva uma linha compacta no topo para o erro, sem
+/// esconder a lista nem empurrá-la para fora da área visível. Sem erro,
+/// devolve `inner` sem alterar — é o caminho comum, sem custo.
+fn reserve_error_banner<T>(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, p: &crate::app::PanelData<T>) -> Rect {
+    let Some(err) = &p.error else { return inner };
+    if inner.height == 0 {
+        return inner;
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(theme.error(format!("⚠ {err}")))),
+        rows[0],
+    );
+    rows[1]
+}
+
 /// Renderiza `lines` a partir do deslocamento `off`.
 fn render_lines(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, lines: Vec<Line>, off: usize) {
     let height = inner.height as usize;
@@ -363,6 +522,18 @@ fn render_scrolled(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, line
     let off = scroll.get().min(max_off);
     scroll.set(off);
     render_lines(frame, theme, inner, lines, off);
+}
+
+/// Teclas específicas do painel em foco, para as ações serem descobríveis.
+///
+/// Só lista teclas que realmente existem em `handle_panel_key` hoje.
+fn panel_hints(focus: Panel) -> &'static str {
+    match focus {
+        Panel::Email => "espaço lido · m move · d exclui",
+        Panel::Jira => "f filtro · p por-pai · n menções · esc volta",
+        Panel::Tasks => "enter expande · espaço alterna · a nova · e edita · d apaga",
+        _ => "",
+    }
 }
 
 fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -385,13 +556,28 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
             ("Tab", "painel"),
         ])
     } else {
-        theme.help_line([
-            ("Tab", "painel"),
-            ("j/k", "rolar"),
-            ("Enter", "abrir"),
-            ("r", "atualizar"),
-            ("q", "sair"),
-        ])
+        let hints = panel_hints(app.focus);
+        if hints.is_empty() {
+            theme.help_line([
+                ("Tab", "painel"),
+                ("j/k", "rolar"),
+                ("Enter", "abrir"),
+                ("r", "atualizar"),
+                ("q", "sair"),
+            ])
+        } else {
+            // As teclas do painel vêm primeiro: são as menos óbvias, e é por elas
+            // que este trecho existe. O texto global encurta para o essencial —
+            // `j/k` e `Enter` são o que qualquer um tenta primeiro, enquanto sair
+            // do programa é a única tecla que precisa estar sempre visível.
+            let mut spans = vec![theme.span(hints), theme.muted(" · ")];
+            spans.extend(
+                theme
+                    .help_line([("Tab", "painel"), ("r", "atualizar"), ("q", "sair")])
+                    .spans,
+            );
+            Line::from(spans)
+        }
     };
     frame.render_widget(Paragraph::new(help), cols[0]);
 
@@ -499,13 +685,20 @@ mod tests {
     use super::*;
     use crate::app::{App, Detail};
     use crate::data::{Account, AgendaItem, EmailItem};
+    use crate::msg::Msg;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui_tea::Model;
     use std::sync::mpsc;
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::channel();
         App::new(BubbleTheme::default(), tx)
+    }
+
+    fn key(code: KeyCode) -> Msg {
+        Msg::Key(KeyEvent::new(code, KeyModifiers::empty()))
     }
 
     fn render_to_string(app: &App, w: u16, h: u16) -> String {
@@ -607,9 +800,13 @@ mod tests {
     }
 
     #[test]
-    fn jira_panel_renders_title_and_ansi_colors() {
+    fn jira_panel_renders_filter_label_and_groups_by_project() {
         let mut app = test_app();
-        app.jira.items = vec!["\x1b[36;1mGOV (1)\x1b[0m".into(), "  \x1b[33mGOV-1\x1b[0m fix".into()];
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-101","summary":"Melhorias no dashboard","status":"Em andamento",
+                 "project":"ENG","url":"u","parent":{"key":"ENG-1","summary":"Eng"}}]"#,
+        )
+        .unwrap();
         app.jira.loaded = true;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| render(&app, f)).unwrap();
@@ -618,19 +815,66 @@ mod tests {
             .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(out.contains("JIRA"));
-        assert!(out.contains("GOV (1)"));
-        let has_cyan = (0..30)
-            .any(|y| (0..120).any(|x| buf[(x, y)].fg == ratatui::style::Color::Cyan));
-        assert!(has_cyan, "o cabeçalho do projeto deve ser renderizado em ciano");
+        assert!(out.contains("JIRA · minhas"), "cabeçalho com o filtro ativo");
+        assert!(out.contains("ENG"), "cabeçalho de grupo do projeto");
+        assert!(out.contains("ENG-101"), "a chave da issue");
+    }
+
+    #[test]
+    fn jira_header_marks_the_active_view() {
+        let mut app = test_app();
+        app.jira.loaded = true;
+        app.jira_view = crate::data::jira::JiraView::ByParent;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = (0..30)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("[por-pai]"), "a visão ativa aparece entre colchetes");
+    }
+
+    #[test]
+    fn footer_shows_the_keys_of_the_focused_panel() {
+        let mut app = test_app();
+        app.update(key(KeyCode::Tab)); // Email -> Jira
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = (0..30)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("f filtro"), "o footer anuncia as teclas do Jira");
+        assert!(out.contains("n menções"));
+    }
+
+    #[test]
+    fn panel_error_is_shown_even_when_it_still_has_items() {
+        // Reproduz o cenário do `open_url` falhando (ou de qualquer refresh
+        // que falhe com dados antigos ainda na tela): o painel não deve
+        // esconder o erro nem esconder a lista atrás dele.
+        let mut app = test_app();
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-101","summary":"Melhorias no dashboard","status":"Em andamento",
+                 "project":"ENG","url":"u","parent":null}]"#,
+        )
+        .unwrap();
+        app.jira.loaded = true;
+        app.jira.error = Some("falha ao abrir o navegador: not found".into());
+
+        let out = render_to_string(&app, 120, 30);
+        assert!(out.contains("falha ao abrir o navegador"), "o erro precisa aparecer");
+        assert!(out.contains("ENG-101"), "a lista não pode sumir atrás do erro");
     }
 
     #[test]
     fn tasks_panel_renders_checkbox_and_titles() {
         let mut app = test_app();
         app.tasks.items = vec![
-            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new() },
-            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new() },
+            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new(), subtasks: Vec::new() },
+            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new(), subtasks: Vec::new() },
         ];
         app.tasks.loaded = true;
         let out = render_to_string(&app, 120, 30);

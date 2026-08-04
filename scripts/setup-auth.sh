@@ -58,7 +58,7 @@ probe() {
 doctor() {
   step "Diagnóstico das autenticações (painéis do daily-tui)"
   echo "    CLIs no PATH:"
-  for c in himalaya gcalcli ghpending jirapending mstodo ortie secret-tool jq; do
+  for c in himalaya gcalcli ghpending jira mstodo ortie secret-tool jq; do
     have "$c" && printf "      ${G}✓${X} %s\n" "$c" || printf "      ${R}✗${X} %s (ausente)\n" "$c"
   done
   echo
@@ -74,7 +74,7 @@ doctor() {
   done
   probe "pulls (ghpending)" "ghpending" \
     "defina GITHUB_TOKEN e rode: ghpending add"
-  probe "jira (jirapending)" "jirapending" \
+  probe "jira (jira)" "jira issues" \
     "defina JIRA_EMAIL / JIRA_CLOUD / JIRA_TOKEN"
   probe "tasks (mstodo)" "mstodo list" \
     "rode: scripts/setup-auth.sh mstodo"

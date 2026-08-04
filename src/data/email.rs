@@ -94,17 +94,74 @@ pub fn sort_recent_first(items: &mut [EmailItem]) {
 ///
 /// Lê apenas o stdout (o himalaya manda warnings de IMAP para o stderr).
 pub fn fetch(account: Account, limit: u32) -> Result<Vec<EmailItem>, String> {
+    let page = limit.to_string();
+    let stdout = run(&[
+        "envelope",
+        "list",
+        "-a",
+        account.himalaya_name(),
+        "--page-size",
+        &page,
+        "-o",
+        "json",
+    ])?;
+    parse_envelopes(&stdout, account)
+}
+
+/// Pastas oferecidas no seletor de "mover" — exatamente os aliases que a config
+/// do himalaya declara em cada conta.
+pub const FOLDERS: [&str; 6] = ["inbox", "sent", "drafts", "trash", "spam", "all"];
+
+/// Excluir é mover para a Lixeira: recuperável, e é o que o Gmail espera.
+pub const DELETE_FOLDER: &str = "trash";
+
+/// Subcomando de `himalaya flag` para ligar ou desligar uma flag.
+const fn flag_verb(seen: bool) -> &'static str {
+    if seen {
+        "add"
+    } else {
+        "remove"
+    }
+}
+
+/// Marca (ou desmarca) o e-mail como lido.
+pub fn set_seen(account: Account, id: &str, seen: bool) -> Result<(), String> {
+    run(&[
+        "flag",
+        flag_verb(seen),
+        id,
+        "seen",
+        "-a",
+        account.himalaya_name(),
+    ])
+    .map(|_| ())
+}
+
+/// Move o e-mail para a pasta dada (nome ou alias conhecido do himalaya).
+pub fn move_to(account: Account, id: &str, folder: &str) -> Result<(), String> {
+    run(&[
+        "message",
+        "move",
+        folder,
+        id,
+        "-a",
+        account.himalaya_name(),
+    ])
+    .map(|_| ())
+}
+
+/// Exclui movendo para a Lixeira — não apaga do servidor.
+pub fn delete(account: Account, id: &str) -> Result<(), String> {
+    move_to(account, id, DELETE_FOLDER)
+}
+
+/// Roda `himalaya <args...>` e devolve o stdout (ou um erro com o stderr).
+///
+/// Lê apenas o stdout: o himalaya manda warnings de IMAP para o stderr, e só o
+/// resumo dele interessa quando o comando falha.
+fn run(args: &[&str]) -> Result<String, String> {
     let output = Command::new("himalaya")
-        .args([
-            "envelope",
-            "list",
-            "-a",
-            account.himalaya_name(),
-            "--page-size",
-            &limit.to_string(),
-            "-o",
-            "json",
-        ])
+        .args(args)
         .output()
         .map_err(|e| format!("falha ao executar himalaya: {e}"))?;
 
@@ -112,24 +169,19 @@ pub fn fetch(account: Account, limit: u32) -> Result<Vec<EmailItem>, String> {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(format!("himalaya falhou: {}", super::stderr_summary(&err)));
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_envelopes(&stdout, account)
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Busca o corpo (texto) de um e-mail específico.
 pub fn fetch_body(account: Account, id: &str) -> Result<String, String> {
-    let output = Command::new("himalaya")
-        .args(["message", "read", id, "-a", account.himalaya_name(), "--no-headers"])
-        .output()
-        .map_err(|e| format!("falha ao executar himalaya: {e}"))?;
-
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("himalaya falhou: {}", super::stderr_summary(&err)));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    run(&[
+        "message",
+        "read",
+        id,
+        "-a",
+        account.himalaya_name(),
+        "--no-headers",
+    ])
 }
 
 #[cfg(test)]
@@ -183,6 +235,24 @@ mod tests {
         assert_eq!(items[0].from, "");
         assert_eq!(items[0].date, "");
         assert!(items[0].unread, "sem flag Seen -> não lido");
+    }
+
+    #[test]
+    fn seen_flag_verb_switches_between_add_and_remove() {
+        assert_eq!(flag_verb(true), "add");
+        assert_eq!(flag_verb(false), "remove");
+    }
+
+    #[test]
+    fn delete_targets_the_trash_alias() {
+        // Excluir é mover para a Lixeira, não apagar do servidor.
+        assert_eq!(DELETE_FOLDER, "trash");
+        assert!(FOLDERS.contains(&DELETE_FOLDER));
+    }
+
+    #[test]
+    fn folders_are_the_aliases_the_config_declares() {
+        assert_eq!(FOLDERS, ["inbox", "sent", "drafts", "trash", "spam", "all"]);
     }
 
     #[test]

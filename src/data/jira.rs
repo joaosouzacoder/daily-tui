@@ -1,54 +1,378 @@
-//! Busca dos tickets do Jira atribuídos a mim e abertos, via `jirapending`
-//! (saída colorida em ANSI, agrupada por projeto).
+//! Issues do Jira via a CLI `jira`, que emite JSON estruturado.
+//!
+//! Diferente do painel antigo (que recebia texto colorido e só rolava), aqui os
+//! itens são estruturados: o painel precisa saber qual issue está sob o cursor
+//! para abri-la no navegador e para reagrupar as linhas por pai.
 
-/// Quebra a saída crua do `jirapending` em linhas, **preservando** os escapes
-/// ANSI (as cores são reaplicadas na renderização via `crate::ansi`).
-/// Descarta apenas as linhas em branco nas pontas.
-pub fn parse_jira(raw: &str) -> Vec<String> {
-    let lines: Vec<String> = raw.lines().map(|l| l.trim_end().to_string()).collect();
+use serde::Deserialize;
 
-    let start = lines.iter().position(|l| !l.trim().is_empty());
-    let end = lines.iter().rposition(|l| !l.trim().is_empty());
-    match (start, end) {
-        (Some(s), Some(e)) => lines[s..=e].to_vec(),
-        _ => Vec::new(),
+/// Uma issue do Jira, já normalizada para exibição.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct JiraItem {
+    pub key: String,
+    pub summary: String,
+    pub status: String,
+    pub project: String,
+    /// Link para o navegador, montado pelo helper.
+    pub url: String,
+    /// Épico ou iniciativa acima desta issue; `None` quando é solta.
+    #[serde(default)]
+    pub parent: Option<JiraParent>,
+    /// Por que a issue está no resultado (assignee/reporter/both).
+    #[serde(default)]
+    pub role: JiraRole,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct JiraParent {
+    pub key: String,
+    pub summary: String,
+}
+
+/// Por que a issue está no resultado. Só é exibido no filtro `ambas`, onde a
+/// pergunta "sou responsável ou só relator disso?" tem resposta ambígua.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum JiraRole {
+    #[default]
+    Assignee,
+    Reporter,
+    Both,
+}
+
+impl JiraRole {
+    /// Marcador curto, no idioma dos `[W]`/`[P]` do e-mail e da agenda.
+    pub const fn marker(self) -> &'static str {
+        match self {
+            JiraRole::Assignee => "[A]",
+            JiraRole::Reporter => "[R]",
+            JiraRole::Both => "[AR]",
+        }
     }
 }
 
-/// Roda o `jirapending` e devolve as linhas (com ANSI).
-pub fn fetch() -> Result<Vec<String>, String> {
-    let output = super::helper_command("jirapending")
+/// Modo de filtro do painel; circulado pela tecla `f`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JiraFilter {
+    #[default]
+    Assignee,
+    Reporter,
+    Both,
+}
+
+impl JiraFilter {
+    /// Valor passado no `--filter` do helper.
+    pub const fn flag(self) -> &'static str {
+        match self {
+            JiraFilter::Assignee => "assignee",
+            JiraFilter::Reporter => "reporter",
+            JiraFilter::Both => "both",
+        }
+    }
+
+    /// Rótulo exibido no cabeçalho do painel.
+    pub const fn label(self) -> &'static str {
+        match self {
+            JiraFilter::Assignee => "minhas",
+            JiraFilter::Reporter => "relator",
+            JiraFilter::Both => "ambas",
+        }
+    }
+
+    /// Próximo modo no ciclo da tecla `f`.
+    pub const fn next(self) -> Self {
+        match self {
+            JiraFilter::Assignee => JiraFilter::Reporter,
+            JiraFilter::Reporter => JiraFilter::Both,
+            JiraFilter::Both => JiraFilter::Assignee,
+        }
+    }
+}
+
+/// Uma linha renderizada do painel.
+///
+/// O cursor do painel indexa **issues**, não linhas: os cabeçalhos de grupo não
+/// são selecionáveis. A renderização usa `row_of_item` para traduzir o cursor na
+/// linha correspondente antes de calcular a rolagem.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JiraRow {
+    Header(String),
+    Issue(usize),
+}
+
+/// Faz o parse da saída de `jira issues` / `jira mentions`.
+pub fn parse_issues(raw: &str) -> Result<Vec<JiraItem>, String> {
+    serde_json::from_str(raw).map_err(|e| format!("JSON inválido do jira: {e}"))
+}
+
+/// Agrupa por projeto, preservando a ordem em que as issues vieram.
+pub fn rows_by_project(items: &[JiraItem]) -> Vec<JiraRow> {
+    let mut rows = Vec::new();
+    let mut current: Option<&str> = None;
+    for (i, item) in items.iter().enumerate() {
+        if current != Some(item.project.as_str()) {
+            rows.push(JiraRow::Header(item.project.clone()));
+            current = Some(item.project.as_str());
+        }
+        rows.push(JiraRow::Issue(i));
+    }
+    rows
+}
+
+/// Índice da linha que mostra a issue `item`; 0 quando não estiver nas linhas.
+pub fn row_of_item(rows: &[JiraRow], item: usize) -> usize {
+    rows.iter()
+        .position(|r| matches!(r, JiraRow::Issue(i) if *i == item))
+        .unwrap_or(0)
+}
+
+/// Visão ativa do painel de Jira.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JiraView {
+    #[default]
+    Issues,
+    ByParent,
+    Mentions,
+}
+
+/// Agrupa pelo pai (épico ou iniciativa). As issues sem pai vão para um grupo
+/// "sem pai" no fim, para não sumirem da visão.
+pub fn rows_by_parent(items: &[JiraItem]) -> Vec<JiraRow> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut orphans: Vec<usize> = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
+        match &item.parent {
+            Some(p) => {
+                let header = format!("{} {}", p.key, p.summary);
+                match groups.iter_mut().find(|(h, _)| *h == header) {
+                    Some((_, list)) => list.push(i),
+                    None => groups.push((header, vec![i])),
+                }
+            }
+            None => orphans.push(i),
+        }
+    }
+    if !orphans.is_empty() {
+        groups.push(("sem pai".to_string(), orphans));
+    }
+
+    let mut rows = Vec::new();
+    for (header, list) in groups {
+        rows.push(JiraRow::Header(header));
+        rows.extend(list.into_iter().map(JiraRow::Issue));
+    }
+    rows
+}
+
+/// Roda `jira issues --filter <modo>` e devolve as issues.
+pub fn fetch(filter: JiraFilter) -> Result<Vec<JiraItem>, String> {
+    parse_issues(&run(&["issues", "--filter", filter.flag()])?)
+}
+
+/// Roda `jira mentions` e devolve as issues onde fui mencionado.
+pub fn fetch_mentions() -> Result<Vec<JiraItem>, String> {
+    parse_issues(&run(&["mentions"])?)
+}
+
+/// Roda `jira <args...>` e devolve o stdout (ou um erro com o stderr).
+fn run(args: &[&str]) -> Result<String, String> {
+    let mut cmd = super::helper_command("jira");
+    // O helper serializa com `ensure_ascii=False`, então resumos acentuados
+    // dependem da codificação do stdout (veja `force_utf8_stdout`).
+    super::force_utf8_stdout(&mut cmd);
+    let output = cmd
+        .args(args)
         .output()
-        .map_err(|e| format!("falha ao executar jirapending: {e}"))?;
+        .map_err(|e| format!("falha ao executar jira: {e}"))?;
 
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("jirapending falhou: {}", super::stderr_summary(&err)));
+        return Err(format!("jira falhou: {}", super::stderr_summary(&err)));
     }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
 
-    Ok(parse_jira(&String::from_utf8_lossy(&output.stdout)))
+/// Abre uma URL no navegador do sistema.
+///
+/// No Windows via `cmd /C start ""` — o primeiro argumento vazio é o título da
+/// janela, sem ele o `start` interpreta a URL como título. No Unix, `xdg-open`.
+pub fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd");
+        // `Command::args` só citaria a URL se ela tivesse espaço ou aspas —
+        // mas quem lê essa linha é o `cmd.exe`, que a retokeniza com sua
+        // própria gramática, onde `&`, `|` e `^` são separadores/escapes, não
+        // texto literal (foi por causa dessa classe de bug, truncando uma URL
+        // no primeiro `&`, que o fluxo OAuth do himalaya trocou pra device
+        // code). `raw_arg` monta a linha crua sem a citação do Rust interferir,
+        // e `quote_for_cmd` bota a URL entre aspas para o cmd.exe tratá-la
+        // como um único token.
+        c.raw_arg(format!("/C start \"\" {}", quote_for_cmd(url)));
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.status()
+        .map_err(|e| format!("falha ao abrir o navegador: {e}"))
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(format!("navegador saiu com {s}"))
+            }
+        })
+}
+
+/// Envolve `url` em aspas para o `cmd.exe` tratar como um único token.
+///
+/// Aspas embutidas na URL são removidas em vez de escapadas: uma URL válida
+/// nunca deveria conter uma, e o `cmd.exe` não tem uma forma segura de
+/// escapar aspas dentro de uma string que já está entre aspas.
+#[cfg(windows)]
+fn quote_for_cmd(url: &str) -> String {
+    format!("\"{}\"", url.replace('"', ""))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // Mesma forma da saída real de `jira issues --filter both`, com conteúdo
+    // inventado: chaves, domínio e resumos aqui não são reais — o repositório
+    // é público, e a saída real carrega tickets internos da empresa (alguns
+    // sobre segurança). Preservei, porém, o que faz o contrato valer a pena
+    // testar: uma issue com pai e duas sem no mesmo projeto (para exercitar
+    // `rows_by_project`/`row_of_item`), a inconsistência real de capitalização
+    // do status ("Em andamento" vs. "Em Andamento") e um resumo acentuado
+    // (para exercitar UTF-8).
+    const REAL: &str = r#"[
+      {"key":"ENG-101","summary":"[Painel] - Melhorias no dashboard de métricas","status":"Em andamento",
+       "project":"ENG","url":"https://example.atlassian.net/browse/ENG-101",
+       "parent":{"key":"ENG-1","summary":"Iniciativa de Engenharia"}},
+      {"key":"OPS-55","summary":"Revisão de configuração de acesso","status":"Em Andamento",
+       "project":"OPS","url":"https://example.atlassian.net/browse/OPS-55","parent":null},
+      {"key":"OPS-56","summary":"Atualização de rotina de backup","status":"Em Andamento",
+       "project":"OPS","url":"https://example.atlassian.net/browse/OPS-56","parent":null}
+    ]"#;
+
     #[test]
-    fn preserves_ansi_and_inner_lines() {
-        let raw = "\n\x1b[36;1mGOV (1)\x1b[0m\n  GOV-1 fix\n\n";
-        let lines = parse_jira(raw);
-        assert_eq!(lines, vec!["\x1b[36;1mGOV (1)\x1b[0m".to_string(), "  GOV-1 fix".to_string()]);
+    fn parses_the_real_contract() {
+        let items = parse_issues(REAL).unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].key, "ENG-101");
+        assert_eq!(items[0].status, "Em andamento");
+        assert_eq!(items[0].url, "https://example.atlassian.net/browse/ENG-101");
+        assert_eq!(items[0].parent.as_ref().unwrap().key, "ENG-1");
+        assert!(items[1].parent.is_none());
     }
 
     #[test]
-    fn trims_only_blank_edges() {
-        let raw = "\n\na\n\nb\n\n";
-        assert_eq!(parse_jira(raw), vec!["a".to_string(), "".to_string(), "b".to_string()]);
+    fn null_parent_and_missing_fields_are_tolerated() {
+        let items = parse_issues(r#"[{"key":"A-1","summary":"s","status":"","project":"A","url":"u","parent":null}]"#).unwrap();
+        assert!(items[0].parent.is_none());
     }
 
     #[test]
-    fn empty_output_yields_no_lines() {
-        assert_eq!(parse_jira("").len(), 0);
-        assert_eq!(parse_jira("\n\n").len(), 0);
+    fn invalid_json_is_an_error() {
+        assert!(parse_issues("nope").is_err());
+    }
+
+    #[test]
+    fn groups_by_project_with_one_header_each() {
+        let items = parse_issues(REAL).unwrap();
+        let rows = rows_by_project(&items);
+        // ENG vem antes de OPS porque a ordem dos itens é preservada.
+        assert!(matches!(&rows[0], JiraRow::Header(h) if h == "ENG"));
+        assert!(matches!(rows[1], JiraRow::Issue(0)));
+        assert!(matches!(&rows[2], JiraRow::Header(h) if h == "OPS"));
+        assert!(matches!(rows[3], JiraRow::Issue(1)));
+        assert!(matches!(rows[4], JiraRow::Issue(2)));
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn row_of_item_finds_the_line_of_each_issue() {
+        let items = parse_issues(REAL).unwrap();
+        let rows = rows_by_project(&items);
+        assert_eq!(row_of_item(&rows, 0), 1);
+        assert_eq!(row_of_item(&rows, 2), 4);
+    }
+
+    #[test]
+    fn empty_input_yields_no_rows() {
+        assert!(rows_by_project(&[]).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_for_cmd_wraps_the_url_so_cmd_treats_it_as_one_token() {
+        assert_eq!(
+            quote_for_cmd("https://x.atlassian.net/browse/A-1"),
+            "\"https://x.atlassian.net/browse/A-1\""
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_for_cmd_preserves_ampersand_pipe_and_caret_inside_the_quotes() {
+        // Sem as aspas, o cmd.exe trataria `&`/`|`/`^` como separadores ou
+        // escapes da própria gramática dele, não como parte da URL.
+        let q = quote_for_cmd("https://x/browse/A-1?a=1&b=2|3^4");
+        assert_eq!(q, "\"https://x/browse/A-1?a=1&b=2|3^4\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quote_for_cmd_strips_embedded_quotes_instead_of_trying_to_escape_them() {
+        assert_eq!(quote_for_cmd("https://x/\"evil\""), "\"https://x/evil\"");
+    }
+
+    #[test]
+    fn parses_the_role_of_each_issue() {
+        let raw = r#"[{"key":"ENG-1","summary":"s","status":"Em andamento","project":"ENG",
+                       "url":"https://example.atlassian.net/browse/ENG-1","parent":null,"role":"both"},
+                      {"key":"OPS-2","summary":"s","status":"Backlog","project":"OPS",
+                       "url":"https://example.atlassian.net/browse/OPS-2","parent":null,"role":"reporter"}]"#;
+        let items = parse_issues(raw).unwrap();
+        assert_eq!(items[0].role, JiraRole::Both);
+        assert_eq!(items[1].role, JiraRole::Reporter);
+        assert_eq!(items[0].role.marker(), "[AR]");
+        assert_eq!(items[1].role.marker(), "[R]");
+    }
+
+    #[test]
+    fn missing_role_defaults_to_assignee() {
+        let items = parse_issues(r#"[{"key":"A-1","summary":"s","status":"","project":"A","url":"u","parent":null}]"#).unwrap();
+        assert_eq!(items[0].role, JiraRole::Assignee);
+        assert_eq!(items[0].role.marker(), "[A]");
+    }
+
+    #[test]
+    fn groups_by_parent_with_orphans_last() {
+        let items = parse_issues(REAL).unwrap();
+        let rows = rows_by_parent(&items);
+        // O grupo do pai vem primeiro, com chave e resumo no cabeçalho.
+        assert!(matches!(&rows[0], JiraRow::Header(h) if h == "ENG-1 Iniciativa de Engenharia"));
+        assert!(matches!(rows[1], JiraRow::Issue(0)));
+        // As sem pai caem num grupo próprio, no fim.
+        assert!(matches!(&rows[2], JiraRow::Header(h) if h == "sem pai"));
+        assert!(matches!(rows[3], JiraRow::Issue(1)));
+        assert!(matches!(rows[4], JiraRow::Issue(2)));
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn by_parent_keeps_every_issue_visible() {
+        // Trocar de visão não pode esconder issue nenhuma.
+        let items = parse_issues(REAL).unwrap();
+        let count = |rows: &[JiraRow]| rows.iter().filter(|r| matches!(r, JiraRow::Issue(_))).count();
+        assert_eq!(count(&rows_by_parent(&items)), count(&rows_by_project(&items)));
     }
 }

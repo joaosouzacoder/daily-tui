@@ -16,6 +16,8 @@ Subcomandos:
   mstodo reopen <id>
   mstodo edit <id> "<título>"
   mstodo delete <id>
+  mstodo check <tarefa> <item>     # marca uma subtarefa ("etapa" no app To Do)
+  mstodo uncheck <tarefa> <item>
 
 Configuração (veja scripts/daily-tui.env.example):
   DAILY_TUI_TODO_CLIENT_ID — Application (client) ID do app registration (obrigatório)
@@ -187,12 +189,22 @@ def to_item(task):
         "completed": task.get("status") == "completed",
         "due": due,
         "notes": ((task.get("body") or {}).get("content") or "").strip(),
+        # O To Do chama de "etapa"; no Graph é checklistItem. Vem embutido pelo
+        # $expand do `list`, sem custo de chamada por tarefa.
+        "subtasks": [
+            {
+                "id": item["id"],
+                "title": (item.get("displayName") or "").strip(),
+                "completed": bool(item.get("isChecked")),
+            }
+            for item in (task.get("checklistItems") or [])
+        ],
     }
 
 
 def do_list():
     raw = []
-    resp = in_list("GET", "?$top=100")
+    resp = in_list("GET", "?$top=100&$expand=checklistItems")
     while True:
         page = resp.json()
         raw.extend(page.get("value", []))
@@ -224,6 +236,11 @@ def do_edit(tid, title):
     in_list("PATCH", f"/{tid}", json={"title": title})
 
 
+def do_check(task_id, item_id, checked):
+    """Marca ou desmarca uma subtarefa (checklistItem) da tarefa dada."""
+    in_list("PATCH", f"/{task_id}/checklistItems/{item_id}", json={"isChecked": checked})
+
+
 def do_delete(tid):
     in_list("DELETE", f"/{tid}")
 
@@ -247,6 +264,10 @@ def main():
         do_edit(rest[0], rest[1])
     elif cmd == "delete":
         do_delete(rest[0])
+    elif cmd == "check":
+        do_check(rest[0], rest[1], True)
+    elif cmd == "uncheck":
+        do_check(rest[0], rest[1], False)
     else:
         die(f"comando desconhecido: {cmd}")
 

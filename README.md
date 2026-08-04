@@ -6,7 +6,7 @@ Painel TUI para deixar sempre rodando num monitor, com o que importa no dia a di
 - 📧 **E-mails** agregados das contas *work* + *personal* (via `himalaya`).
 - 📅 **Agenda** dos próximos 7 dias, agregada das duas contas Google (via `gcalcli`).
 - 🔀 **PRs/issues** pendentes nos repos monitorados (via `ghpending`).
-- 🎫 **Jira** com os tickets abertos atribuídos a você, agrupados por projeto (via `jirapending`).
+- 🎫 **Jira** com suas issues, agrupadas por projeto ou por pai, e as menções recentes (via `jira`).
 - ✅ **Tarefas** do Microsoft To Do, com criar/concluir/editar/apagar pela TUI (via `mstodo`).
 
 Painel passivo com navegação leve: rola as listas e abre o corpo de um e-mail.
@@ -56,7 +56,7 @@ O `install.sh` é **idempotente** (pode rodar de novo) e faz:
 3. `cargo install himalaya ortie ghpending`;
 4. `uv tool install gcalcli`;
 5. compila o `daily-tui` em release e cria o link `~/.local/bin/daily-tui`;
-6. copia os helpers `jirapending` e `mstodo` para `~/.local/bin`.
+6. copia os helpers `jira` e `mstodo` para `~/.local/bin`.
 
 Depois, configure as autenticações com o script guiado
 ([Configuração das contas](#configuração-das-contas)):
@@ -91,13 +91,13 @@ Garanta que `~/.local/bin` e `~/.cargo/bin` estão no seu `PATH` (o script avisa
 > ```bat
 > if not exist "%USERPROFILE%\.local\bin" mkdir "%USERPROFILE%\.local\bin"
 > copy scripts\mstodo* %USERPROFILE%\.local\bin\
-> copy scripts\jirapending* %USERPROFILE%\.local\bin\
+> copy scripts\jira* %USERPROFILE%\.local\bin\
 > ```
-> São dois helpers, cada um com o seu shim `.cmd` — que localiza o script irmão
-> (o `mstodo` em Python, o `jirapending.ps1`) pelo `%~dp0`. (O `copy` do `cmd`
-> não aceita múltiplas origens soltas — só concatenação com `+` — por isso o
-> `*`; o `mkdir` evita o `copy` criar um arquivo chamado `bin` se a pasta ainda
-> não existir.)
+> São dois helpers, cada um com o seu shim `.cmd` — que roda o script Python
+> irmão (`mstodo`, `jira`) via `uv run --script`, localizando-o pelo `%~dp0`.
+> (O `copy` do `cmd` não aceita múltiplas origens soltas — só concatenação com
+> `+` — por isso o `*`; o `mkdir` evita o `copy` criar um arquivo chamado `bin`
+> se a pasta ainda não existir.)
 >
 > **Autenticar no Windows:** os `*.sh` não servem. Rode
 > `scripts\google-auth.cmd` (ou `powershell -File scripts\google-auth.ps1`): ele
@@ -116,7 +116,7 @@ Garanta que `~/.local/bin` e `~/.cargo/bin` estão no seu `PATH` (o script avisa
 | `ortie`       | E-mails       | broker de token OAuth que o himalaya usa para Gmail/Workspace | `cargo install ortie`       |
 | `gcalcli`     | Agenda        | lê eventos do Google Calendar em TSV                       | `uv tool install gcalcli`      |
 | `ghpending`   | PRs/issues    | digest de PRs/issues abertos nos repos que você acompanha  | `cargo install ghpending`      |
-| `jirapending` | Jira          | script (bash) que consulta a API do Jira e colore a saída  | `scripts/jirapending` (repo)   |
+| `jira`        | Jira          | CLI (Python/uv) que consulta a API do Jira e emite JSON    | `scripts/jira` (repo)          |
 | `mstodo`      | Tarefas       | CLI (Python/uv) para o Microsoft To Do com CRUD            | `scripts/mstodo` (repo)        |
 
 Ferramentas de apoio:
@@ -124,11 +124,9 @@ Ferramentas de apoio:
 | Ferramenta | Necessária para | Observação                                                        |
 |------------|-----------------|-------------------------------------------------------------------|
 | Rust/cargo | compilar tudo   | instalado via rustup pelo `install.sh`                            |
-| `uv`       | `gcalcli`, `mstodo` | runner Python self-contained (não precisa de venv manual)     |
+| `uv`       | `gcalcli`, `jira`, `mstodo` | runner Python self-contained (não precisa de venv manual) |
 | `secret-tool` (libsecret) + keyring | `ortie`/e-mail | o `ortie` guarda o token OAuth no keyring (gnome-keyring/kwallet) |
-| `jq`       | `jirapending`, `setup-auth.sh` | monta JSON e lê o client secret do Google            |
-| `curl`     | `jirapending`   | chama a REST API do Jira                                           |
-| `op`       | `jirapending` (opcional) | só no *fallback* do token via 1Password CLI              |
+| `jq`       | `setup-auth.sh` | lê o client secret do Google                                       |
 
 ---
 
@@ -304,7 +302,7 @@ ghpending list                   # confere a lista (~/.config/ghpending/config.t
 
 Teste: `ghpending` deve imprimir o digest colorido.
 
-### 5. Jira — jirapending (variáveis de ambiente)
+### 5. Jira — jira (variáveis de ambiente)
 
 ```sh
 export JIRA_EMAIL="voce@suaempresa.com"
@@ -312,10 +310,36 @@ export JIRA_CLOUD="suaempresa.atlassian.net"
 export JIRA_TOKEN="seu_api_token"   # https://id.atlassian.com/manage-profile/security/api-tokens
 ```
 
-> Não quer o token no shell? **Não** exporte `JIRA_TOKEN`: o script busca no
-> 1Password (`op item get "Token JIRA"`). Customize com `JIRA_OP_ITEM` e `JIRA_JQL`.
+O helper `jira` (Python via `uv`) tem dois subcomandos, ambos emitindo JSON:
 
-Teste: `jirapending` deve listar seus tickets agrupados por projeto.
+```sh
+jira issues                          # minhas issues (assignee), com o pai de cada uma
+jira issues --filter reporter        # issues em que sou o relator
+jira issues --filter both            # os dois filtros combinados
+jira mentions                        # issues onde fui mencionado nos últimos 30 dias
+```
+
+> O modo `reporter` filtra por `statusCategory = 'In Progress'`, diferente dos
+> outros dois (`statusCategory != Done`): a versão simétrica devolvia mais de
+> 100 issues, quase todas ruído de um único projeto, contra 7 em andamento.
+>
+> `mentions` é "onde fui mencionado nos últimos 30 dias" — **não** é
+> notificação não lida: o Jira não tem JQL para status de leitura.
+
+Cada issue no JSON traz um campo `"role"`, comparado com o `accountId` do
+token: `"assignee"` (sou o responsável), `"reporter"` (só relatei) ou
+`"both"` (os dois). Ausência do campo (ex.: `JIRA_JQL` customizada) equivale
+a `"assignee"`. No painel, o marcador (`[A]`/`[R]`/`[AR]`) só aparece no
+filtro `ambas` — nos outros filtros toda issue tem o mesmo papel.
+
+`JIRA_JQL`, se definida, substitui a consulta inteira do `issues` e o
+`--filter` deixa de ter efeito:
+
+```sh
+export JIRA_JQL="project = ENG AND statusCategory != Done ORDER BY updated DESC"
+```
+
+Teste: `jira issues` deve listar suas issues em JSON.
 
 ---
 
@@ -339,7 +363,7 @@ recompile depois com `./scripts/install.sh --skip-system --skip-clis`:
 - `himalaya_name` — precisa bater com os nomes em `himalaya account configure`;
 - `gcalcli_dir` — subdiretório de cada conta sob `~/.local/share/gcalcli-accounts`.
 
-Os helpers `jirapending` e `mstodo` já são configuráveis por variáveis de ambiente
+Os helpers `jira` e `mstodo` já são configuráveis por variáveis de ambiente
 (não exigem editar código).
 
 ---
@@ -370,13 +394,37 @@ resto do painel continua funcionando.
 | `Tab` / `⇧Tab` | Troca o painel focado                   |
 | `j` / `k`      | Rola para baixo / cima                  |
 | `g` / `G`      | Topo / fim da lista                     |
-| `Enter`        | Abre o corpo do e-mail (painel E-mails) |
+| `Enter`        | Abre o item do painel focado             |
 | `Esc`          | Fecha o detalhe / cancela o prompt      |
 | `r`            | Atualiza os dados agora                 |
 | `q` / `Ctrl-C` | Sai                                     |
 
+O rodapé mostra as teclas do painel em foco, então não é preciso decorar.
+
+No painel **E-mails**: `Enter` abre o corpo · `Espaço` marca lido/não lido ·
+`m` move para uma pasta (`j`/`k` escolhem na lista) · `d` exclui. **Excluir move
+para a Lixeira**, não apaga do servidor — é recuperável, e pede confirmação
+(`y`/`n`). As pastas oferecidas são os aliases que a sua config do himalaya
+declara: `inbox`, `sent`, `drafts`, `trash`, `spam`, `all`. Toda escrita re-busca
+a lista das duas contas, para o painel refletir o servidor e não um palpite local.
+
 No painel **Tarefas**: `Espaço` conclui/reabre · `a` cria · `e` edita · `d` apaga
-(confirma com `y`/`n`).
+(confirma com `y`/`n`) · `Enter` expande/recolhe as subtarefas.
+
+Subtarefa no Microsoft To Do é o que o app chama de **etapa** (`checklistItem` no
+Graph) — quem procurar "subtarefa" na interface da Microsoft não acha. Uma tarefa
+com etapas mostra `▸` quando recolhida e `▾` quando expandida; sem etapas, não
+mostra marca nenhuma. Com as etapas à vista, o cursor anda por elas e o `Espaço`
+age na linha sob o cursor: a tarefa, ou a etapa. Criar, editar e apagar continuam
+valendo só para tarefas.
+
+No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
+o filtro (`minhas` → `relator` → `ambas`) · `p` mostra as issues agrupadas por
+pai · `n` mostra as menções recentes · `Esc` volta para a visão de issues. O
+rodapé mostra essas teclas sempre que o painel de Jira (ou o de Tarefas) está
+em foco. No filtro `ambas`, cada issue ganha um marcador esmaecido —
+`[A]` assignee, `[R]` reporter, `[AR]` os dois — exceto na visão de menções,
+onde o papel não se aplica.
 
 ---
 
@@ -407,7 +455,7 @@ Primeiro recurso, sempre: **`./scripts/setup-auth.sh check`** — ele aponta qua
 | `ortie`: erro de keyring / `secret-tool`         | não há keyring rodando. Inicie o gnome-keyring/kwallet (sessão gráfica) e refaça o auth. |
 | `Workspace`: login do e-mail recusado            | o admin do Workspace bloqueia apps OAuth de terceiros — use um OAuth client próprio.  |
 | Agenda vazia                                     | token do gcalcli daquela conta expirou — `XDG_DATA_HOME=... gcalcli list` ou `setup-auth.sh google`. |
-| `jirapending falhou`                             | `JIRA_EMAIL`/`JIRA_CLOUD`/`JIRA_TOKEN` ausentes ou token inválido.                    |
+| `jira falhou`                                     | `JIRA_EMAIL`/`JIRA_CLOUD`/`JIRA_TOKEN` ausentes ou token inválido.                    |
 | `mstodo: sem credenciais — rode: mstodo auth`    | falta autorizar; rode `mstodo auth` (ou `setup-auth.sh mstodo`; no Windows, `scripts\google-auth.cmd`). |
 | `client secret não encontrado`                   | baixe o OAuth client (Google Cloud) e rode `setup-auth.sh google`.                   |
 | Erro de compilação por OpenSSL                   | falta `libssl-dev`/`openssl-devel` — rode o `install.sh` sem `--skip-system`.        |

@@ -1,0 +1,187 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "requests",
+# ]
+# ///
+"""jira — CLI mínima do Jira Cloud para o painel do daily-tui.
+
+Subcomandos:
+  jira issues [--filter assignee|reporter|both]   # minhas issues, com o pai de cada uma
+  jira mentions                                   # issues onde me mencionaram (30 dias)
+
+Configuração:
+  JIRA_EMAIL — e-mail da conta Atlassian        (obrigatório)
+  JIRA_CLOUD — domínio, ex.: empresa.atlassian.net (obrigatório)
+  JIRA_TOKEN — API token                        (obrigatório)
+  JIRA_JQL   — substitui a consulta inteira do `issues`; o --filter passa a
+               não ter efeito (precedência documentada no README)
+
+Todo erro sai como UMA linha no stderr: o painel mostra só o resumo (ver
+`stderr_summary` em src/data/mod.rs), então traceback não ajuda.
+"""
+import json
+import os
+import re
+import sys
+from functools import cache
+
+import requests
+
+TIMEOUT = 30
+ORDER = "ORDER BY project ASC, updated DESC"
+FIELDS = ["summary", "status", "project", "parent", "assignee", "reporter"]
+
+# Cláusulas por modo de filtro. O modo `reporter` NÃO usa `statusCategory != Done`
+# como os outros: essa combinação devolve mais de 100 issues, quase todas de um
+# projeto só (medido em 2026-08-03). Ver o spec, seção "Revisões guiadas por dado".
+FILTERS = {
+    "assignee": "assignee = currentUser() AND statusCategory != Done",
+    "reporter": "reporter = currentUser() AND statusCategory = 'In Progress'",
+    "both": "(assignee = currentUser() AND statusCategory != Done)"
+            " OR (reporter = currentUser() AND statusCategory = 'In Progress')",
+}
+
+
+def die(msg):
+    """Sai com código 1 e a mensagem no stderr."""
+    sys.exit(str(msg))
+
+
+@cache
+def config():
+    """(email, cloud, token), validados. Aceita JIRA_CLOUD com ou sem esquema."""
+    email = os.environ.get("JIRA_EMAIL", "").strip()
+    cloud = os.environ.get("JIRA_CLOUD", "").strip()
+    token = os.environ.get("JIRA_TOKEN", "").strip()
+    for name, value in (("JIRA_EMAIL", email), ("JIRA_CLOUD", cloud), ("JIRA_TOKEN", token)):
+        if not value:
+            die(f"defina {name}")
+    cloud = re.sub(r"^https?://", "", cloud).rstrip("/")
+    return email, cloud, token
+
+
+@cache
+def account_id():
+    """accountId do dono do token; usado para o papel e para as menções."""
+    me = api("GET", "/rest/api/3/myself").json().get("accountId")
+    if not me:
+        die("Jira não devolveu o accountId em /myself")
+    return me
+
+
+def role_of(fields, me):
+    """Por que a issue entrou no resultado: sou responsável, relator, ou os dois."""
+    is_assignee = ((fields.get("assignee") or {}).get("accountId")) == me
+    is_reporter = ((fields.get("reporter") or {}).get("accountId")) == me
+    if is_assignee and is_reporter:
+        return "both"
+    return "reporter" if is_reporter else "assignee"
+
+
+def error_message(resp):
+    try:
+        body = resp.json()
+        msgs = body.get("errorMessages") or []
+        if msgs:
+            return "; ".join(msgs)
+        return json.dumps(body.get("errors") or body)[:200]
+    except ValueError:
+        return resp.text[:200]
+
+
+def api(method, path, **kw):
+    email, cloud, token = config()
+    resp = requests.request(method, f"https://{cloud}{path}",
+                            auth=(email, token), timeout=TIMEOUT, **kw)
+    if not resp.ok:
+        die(f"Jira {resp.status_code}: {error_message(resp).replace(chr(10), ' ')}")
+    return resp
+
+
+def search(jql):
+    """Todas as issues da consulta, seguindo a paginação por nextPageToken."""
+    issues, page_token = [], None
+    while True:
+        body = {"jql": jql, "fields": FIELDS, "maxResults": 100}
+        if page_token:
+            body["nextPageToken"] = page_token
+        page = api("POST", "/rest/api/3/search/jql", json=body).json()
+        issues.extend(page.get("issues") or [])
+        page_token = page.get("nextPageToken")
+        if not page_token:
+            break
+    return issues
+
+
+def to_item(issue, cloud, me):
+    """Converte a issue crua do Jira no contrato que o painel espera."""
+    fields = issue.get("fields") or {}
+    parent = fields.get("parent")
+    item = {
+        "key": issue["key"],
+        "summary": (fields.get("summary") or "").strip(),
+        "status": ((fields.get("status") or {}).get("name") or "").strip(),
+        "project": ((fields.get("project") or {}).get("key") or "").strip(),
+        "url": f"https://{cloud}/browse/{issue['key']}",
+        "parent": None,
+        "role": role_of(fields, me),
+    }
+    if parent:
+        item["parent"] = {
+            "key": parent.get("key", ""),
+            "summary": ((parent.get("fields") or {}).get("summary") or "").strip(),
+        }
+    return item
+
+
+def emit(issues):
+    _, cloud, _ = config()
+    me = account_id()
+    print(json.dumps([to_item(i, cloud, me) for i in issues], ensure_ascii=False))
+
+
+def do_issues(mode):
+    override = os.environ.get("JIRA_JQL", "").strip()
+    if override:
+        jql = override
+    else:
+        if mode not in FILTERS:
+            die(f"filtro inválido: {mode}")
+        jql = f"{FILTERS[mode]} {ORDER}"
+    emit(search(jql))
+
+
+def do_mentions():
+    me = account_id()
+    emit(search(
+        f'(comment ~ "{me}" OR description ~ "{me}")'
+        " AND updated >= -30d ORDER BY updated DESC"))
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        die("uso: jira {issues [--filter assignee|reporter|both]|mentions}")
+    cmd, rest = args[0], args[1:]
+    if cmd == "issues":
+        mode = "assignee"
+        if rest:
+            if rest[0] != "--filter" or len(rest) < 2:
+                die("uso: jira issues [--filter assignee|reporter|both]")
+            mode = rest[1]
+        do_issues(mode)
+    elif cmd == "mentions":
+        do_mentions()
+    else:
+        die(f"comando desconhecido: {cmd}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:  # honra o contrato de uma linha no stderr
+        die(f"{type(exc).__name__}: {exc}")

@@ -12,7 +12,7 @@ pub use tasks::TaskItem;
 
 /// Cria um `Command` para um helper externo, tratando a diferença do Windows.
 ///
-/// No Windows, `jirapending` e `mstodo` são shims `.cmd` — e o `CreateProcess`
+/// No Windows, `jira` e `mstodo` são shims `.cmd` — e o `CreateProcess`
 /// (usado por `Command`) só executa `.exe` diretamente, então rodamos via
 /// `cmd /C`. As CLIs `.exe` (himalaya/gcalcli/ghpending) chamam direto e não
 /// passam por aqui. No Unix é sempre exec direto.
@@ -29,7 +29,7 @@ pub fn helper_command(program: &str) -> std::process::Command {
     }
 }
 
-/// Força as CLIs escritas em Python (`gcalcli`, `mstodo`) a emitir UTF-8.
+/// Força as CLIs escritas em Python (`gcalcli`, `jira`, `mstodo`) a emitir UTF-8.
 ///
 /// Com o stdout num pipe o Python não usa UTF-8, e sim a codificação de locale
 /// — no Windows, a ANSI code page (cp1252 nesta máquina). Aí "Escritório" sai
@@ -169,10 +169,12 @@ mod tests {
         "\x1b[96mNote\x1b[0m: Run with --trace to enable verbose logs with backtrace.\n",
     );
 
-    // stderr real do `jirapending` quando o domínio Atlassian devolveu 400.
-    const JIRAPENDING_HTTP_FAIL: &str = concat!(
+    // stderr real do antigo helper de Jira em PowerShell (removido nesta
+    // migração para o helper `jira` em Python) quando o domínio Atlassian
+    // devolveu 400. Mantido como fixture do parsing de erro de uma linha.
+    const POWERSHELL_HTTP_FAIL: &str = concat!(
         "Invoke-RestMethod : The remote server returned an error: (400) Bad Request.\n",
-        "At C:\\Users\\voce\\projects\\daily-tui\\scripts\\jirapending.ps1:39 char:9\n",
+        "At C:\\Users\\voce\\projects\\daily-tui\\scripts\\jira-legacy.ps1:39 char:9\n",
         "+ $resp = Invoke-RestMethod -Method Post -Uri \"https://$cloud/rest/api/ ...\n",
         "+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n",
         "    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebException\n",
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn picks_first_line_of_a_powershell_error() {
-        let msg = stderr_summary(JIRAPENDING_HTTP_FAIL);
+        let msg = stderr_summary(POWERSHELL_HTTP_FAIL);
         assert_eq!(
             msg,
             "Invoke-RestMethod : The remote server returned an error: (400) Bad Request."
@@ -215,7 +217,7 @@ mod tests {
 
     #[test]
     fn says_something_when_stderr_is_silent() {
-        // Antes o painel mostrava só "jirapending falhou:" e nada mais.
+        // Antes o painel mostrava só "jira falhou:" e nada mais.
         assert_eq!(stderr_summary(""), "sem detalhes no stderr");
         assert_eq!(stderr_summary("\n  \n"), "sem detalhes no stderr");
     }

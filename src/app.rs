@@ -10,7 +10,9 @@ use ratatui_bubbletea_components::{Spinner, SpinnerFrames};
 use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
-use crate::data::{AgendaItem, EmailItem, TaskItem};
+use crate::data::jira::{JiraFilter, JiraItem, JiraView};
+use crate::data::{email, tasks};
+use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
 use crate::ui;
 use crate::worker::WorkerCmd;
@@ -144,6 +146,18 @@ pub enum Prompt {
     Input { kind: InputKind, buffer: String },
     /// Confirmação de exclusão da tarefa selecionada.
     ConfirmDelete { id: String, title: String },
+    /// Escolha de pasta para mover o e-mail sob o cursor.
+    PickFolder {
+        account: Account,
+        id: String,
+        cursor: usize,
+    },
+    /// Confirmação de exclusão do e-mail (move para a Lixeira).
+    ConfirmEmailDelete {
+        account: Account,
+        id: String,
+        subject: String,
+    },
 }
 
 /// Modelo principal da aplicação.
@@ -153,7 +167,17 @@ pub struct App {
     pub now: DateTime<Local>,
     pub focus: Panel,
     pub emails: PanelData<EmailItem>,
-    pub jira: PanelData<String>,
+    pub jira: PanelData<JiraItem>,
+    /// Modo de filtro do painel de Jira, circulado pela tecla `f`.
+    pub jira_filter: JiraFilter,
+    /// Ids das tarefas com as subtarefas expandidas no painel.
+    pub tasks_expanded: std::collections::HashSet<String>,
+    /// Visão ativa do painel de Jira (issues/por-pai/menções), circulada por
+    /// `p`/`n`/`Esc`.
+    pub jira_view: JiraView,
+    /// Issues onde fui mencionado; painel próprio, buscado só quando a visão
+    /// de menções é aberta pela primeira vez.
+    pub jira_mentions: PanelData<JiraItem>,
     pub agenda: PanelData<AgendaItem>,
     pub pulls: PanelData<String>,
     pub tasks: PanelData<TaskItem>,
@@ -174,6 +198,10 @@ impl App {
             focus: Panel::Email,
             emails: PanelData::new(),
             jira: PanelData::new(),
+            jira_filter: JiraFilter::default(),
+            jira_view: JiraView::default(),
+            tasks_expanded: std::collections::HashSet::new(),
+            jira_mentions: PanelData::new(),
             agenda: PanelData::new(),
             pulls: PanelData::new(),
             tasks: PanelData::new(),
@@ -187,21 +215,46 @@ impl App {
         }
     }
 
+    /// `PanelData` de Jira sob o cursor na visão ativa: `jira_mentions` na
+    /// visão de menções (dados próprios), `jira` nas outras duas (issues e
+    /// por-pai só reagrupam o mesmo conjunto).
+    fn jira_panel_data(&mut self) -> &mut PanelData<JiraItem> {
+        match self.jira_view {
+            JiraView::Mentions => &mut self.jira_mentions,
+            JiraView::Issues | JiraView::ByParent => &mut self.jira,
+        }
+    }
+
     /// Rola/move o painel focado. E-mail move a seleção; agenda/PRs rolam livre.
     fn focused_scroll(&mut self, delta: isize) {
         match self.focus {
             Panel::Email => self.emails.move_cursor(delta),
-            Panel::Jira => self.jira.scroll_by(delta),
+            Panel::Jira => self.jira_panel_data().move_cursor(delta),
             Panel::Agenda => self.agenda.scroll_by(delta),
             Panel::Pulls => self.pulls.scroll_by(delta),
-            Panel::Tasks => self.tasks.move_cursor(delta),
+            // Tarefas é o único painel onde o cursor indexa **linhas**, não
+            // itens: com subtarefas expandidas há mais linhas que tarefas, e
+            // `move_cursor` limitaria ao número de tarefas — deixando as
+            // subtarefas do fim inalcançáveis.
+            Panel::Tasks => self.move_task_cursor(delta),
         }
+    }
+
+    /// Move o cursor do painel de Tarefas sobre as linhas renderizadas.
+    fn move_task_cursor(&mut self, delta: isize) {
+        let total = tasks::rows(&self.tasks.items, &self.tasks_expanded).len();
+        if total == 0 {
+            self.tasks.cursor = 0;
+            return;
+        }
+        let max = (total - 1) as isize;
+        self.tasks.cursor = (self.tasks.cursor as isize + delta).clamp(0, max) as usize;
     }
 
     fn focused_to_first(&mut self) {
         match self.focus {
             Panel::Email => self.emails.to_first(),
-            Panel::Jira => self.jira.scroll.set(0),
+            Panel::Jira => self.jira_panel_data().to_first(),
             Panel::Agenda => self.agenda.scroll.set(0),
             Panel::Pulls => self.pulls.scroll.set(0),
             Panel::Tasks => self.tasks.to_first(),
@@ -212,17 +265,18 @@ impl App {
         // Para listas roláveis, o valor grande é clampado ao máximo na render.
         match self.focus {
             Panel::Email => self.emails.to_last(),
-            Panel::Jira => self.jira.scroll.set(usize::MAX),
+            Panel::Jira => self.jira_panel_data().to_last(),
             Panel::Agenda => self.agenda.scroll.set(usize::MAX),
             Panel::Pulls => self.pulls.scroll.set(usize::MAX),
-            Panel::Tasks => self.tasks.to_last(),
+            // Idem: o fim da lista de Tarefas é a última linha, não a última tarefa.
+            Panel::Tasks => {
+                let total = tasks::rows(&self.tasks.items, &self.tasks_expanded).len();
+                self.tasks.cursor = total.saturating_sub(1);
+            }
         }
     }
 
     fn open_detail(&mut self) {
-        if self.focus != Panel::Email {
-            return;
-        }
         if let Some(item) = self.emails.items.get(self.emails.cursor) {
             self.detail = Some(Detail {
                 from: item.from.clone(),
@@ -233,6 +287,59 @@ impl App {
             let _ = self.cmd_tx.send(WorkerCmd::ReadEmail {
                 account: item.account,
                 id: item.id.clone(),
+            });
+        }
+    }
+
+    /// Abre no navegador a issue sob o cursor. O erro vai para o painel, como
+    /// qualquer outra falha de busca. Na visão de menções, a issue e o cursor
+    /// vêm de `jira_mentions`, não de `jira` — são conjuntos de dados diferentes.
+    fn open_selected_issue(&mut self) {
+        let url = match self.jira_view {
+            JiraView::Mentions => self.jira_mentions.items.get(self.jira_mentions.cursor).map(|i| i.url.clone()),
+            JiraView::Issues | JiraView::ByParent => self.jira.items.get(self.jira.cursor).map(|i| i.url.clone()),
+        };
+        let Some(url) = url else {
+            return;
+        };
+        if let Err(e) = crate::data::jira::open_url(&url) {
+            match self.jira_view {
+                JiraView::Mentions => self.jira_mentions.error = Some(e),
+                JiraView::Issues | JiraView::ByParent => self.jira.error = Some(e),
+            }
+        }
+    }
+
+    /// Alterna lido/não lido do e-mail sob o cursor.
+    fn toggle_email_seen(&mut self) {
+        if let Some(item) = self.emails.items.get(self.emails.cursor) {
+            let _ = self.cmd_tx.send(WorkerCmd::EmailSetSeen {
+                account: item.account,
+                id: item.id.clone(),
+                // `unread` verdadeiro significa que falta a flag Seen: marcar.
+                seen: item.unread,
+            });
+        }
+    }
+
+    /// Abre o seletor de pasta para o e-mail sob o cursor.
+    fn open_move_email(&mut self) {
+        if let Some(item) = self.emails.items.get(self.emails.cursor) {
+            self.prompt = Some(Prompt::PickFolder {
+                account: item.account,
+                id: item.id.clone(),
+                cursor: 0,
+            });
+        }
+    }
+
+    /// Pede confirmação antes de mover o e-mail para a Lixeira.
+    fn open_delete_email(&mut self) {
+        if let Some(item) = self.emails.items.get(self.emails.cursor) {
+            self.prompt = Some(Prompt::ConfirmEmailDelete {
+                account: item.account,
+                id: item.id.clone(),
+                subject: item.subject.clone(),
             });
         }
     }
@@ -263,14 +370,64 @@ impl App {
     }
 
     /// Alterna a tarefa selecionada entre concluída e pendente.
+    /// Linha sob o cursor no painel de Tarefas: uma tarefa ou uma subtarefa.
+    fn selected_row(&self) -> Option<tasks::TaskRow> {
+        tasks::rows(&self.tasks.items, &self.tasks_expanded)
+            .get(self.tasks.cursor)
+            .cloned()
+    }
+
+    /// Alterna o estado da linha sob o cursor — tarefa ou subtarefa.
     fn toggle_task(&mut self) {
-        if let Some(t) = self.selected_task() {
-            let cmd = if t.completed {
-                WorkerCmd::TaskReopen(t.id.clone())
-            } else {
-                WorkerCmd::TaskComplete(t.id.clone())
-            };
-            let _ = self.cmd_tx.send(cmd);
+        let cmd = match self.selected_row() {
+            Some(tasks::TaskRow::Task(t)) => match self.tasks.items.get(t) {
+                Some(item) if item.completed => WorkerCmd::TaskReopen(item.id.clone()),
+                Some(item) => WorkerCmd::TaskComplete(item.id.clone()),
+                None => return,
+            },
+            Some(tasks::TaskRow::Sub { task, sub }) => {
+                let pair = self
+                    .tasks
+                    .items
+                    .get(task)
+                    .and_then(|item| item.subtasks.get(sub).map(|s| (item, s)));
+                match pair {
+                    Some((item, s)) => WorkerCmd::SubTaskToggle {
+                        task_id: item.id.clone(),
+                        item_id: s.id.clone(),
+                        check: !s.completed,
+                    },
+                    None => return,
+                }
+            }
+            None => return,
+        };
+        let _ = self.cmd_tx.send(cmd);
+    }
+
+    /// Expande ou recolhe as subtarefas da tarefa sob o cursor.
+    ///
+    /// Reancora o cursor na própria tarefa depois: recolher encurta a lista de
+    /// linhas, e manter o índice antigo apontaria para outra coisa.
+    fn toggle_expand(&mut self) {
+        let t = match self.selected_row() {
+            Some(tasks::TaskRow::Task(t)) => t,
+            Some(tasks::TaskRow::Sub { task, .. }) => task,
+            None => return,
+        };
+        let Some(item) = self.tasks.items.get(t) else {
+            return;
+        };
+        if item.subtasks.is_empty() {
+            return; // nada a expandir; não pisca nem abre linha vazia
+        }
+        let id = item.id.clone();
+        if !self.tasks_expanded.remove(&id) {
+            self.tasks_expanded.insert(id);
+        }
+        let rows = tasks::rows(&self.tasks.items, &self.tasks_expanded);
+        if let Some(pos) = rows.iter().position(|r| *r == tasks::TaskRow::Task(t)) {
+            self.tasks.cursor = pos;
         }
     }
 
@@ -314,9 +471,22 @@ impl App {
                 KeyCode::Enter => self.submit_prompt(),
                 _ => {}
             },
-            Some(Prompt::ConfirmDelete { .. }) => match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.submit_prompt(),
-                KeyCode::Char('n') | KeyCode::Esc => self.prompt = None,
+            Some(Prompt::ConfirmDelete { .. }) | Some(Prompt::ConfirmEmailDelete { .. }) => {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Enter => self.submit_prompt(),
+                    KeyCode::Char('n') | KeyCode::Esc => self.prompt = None,
+                    _ => {}
+                }
+            }
+            Some(Prompt::PickFolder { cursor, .. }) => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    *cursor = (*cursor + 1).min(email::FOLDERS.len() - 1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    *cursor = cursor.saturating_sub(1);
+                }
+                KeyCode::Enter => self.submit_prompt(),
+                KeyCode::Esc => self.prompt = None,
                 _ => {}
             },
             None => {}
@@ -337,6 +507,18 @@ impl App {
                 }
             }
             Some(Prompt::ConfirmDelete { id, .. }) => WorkerCmd::TaskDelete(id),
+            Some(Prompt::PickFolder {
+                account,
+                id,
+                cursor,
+            }) => WorkerCmd::EmailMove {
+                account,
+                id,
+                folder: email::FOLDERS[cursor.min(email::FOLDERS.len() - 1)].to_string(),
+            },
+            Some(Prompt::ConfirmEmailDelete { account, id, .. }) => {
+                WorkerCmd::EmailDelete { account, id }
+            }
             None => return,
         };
         let _ = self.cmd_tx.send(cmd);
@@ -354,15 +536,44 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.focused_scroll(-1),
             KeyCode::Char('g') | KeyCode::Home => self.focused_to_first(),
             KeyCode::Char('G') | KeyCode::End => self.focused_to_last(),
-            KeyCode::Enter => self.open_detail(),
+            KeyCode::Enter => match self.focus {
+                Panel::Email => self.open_detail(),
+                Panel::Jira => self.open_selected_issue(),
+                Panel::Tasks => self.toggle_expand(),
+                _ => {}
+            },
             KeyCode::Char('r') => {
                 let _ = self.cmd_tx.send(WorkerCmd::RefreshAll);
             }
             // Ações do painel de tarefas (só quando ele está focado).
+            KeyCode::Char(' ') if self.focus == Panel::Email => self.toggle_email_seen(),
+            KeyCode::Char('m') if self.focus == Panel::Email => self.open_move_email(),
+            KeyCode::Char('d') if self.focus == Panel::Email => self.open_delete_email(),
             KeyCode::Char(' ') if self.focus == Panel::Tasks => self.toggle_task(),
             KeyCode::Char('a') if self.focus == Panel::Tasks => self.open_add_task(),
             KeyCode::Char('e') if self.focus == Panel::Tasks => self.open_edit_task(),
             KeyCode::Char('d') if self.focus == Panel::Tasks => self.open_delete_task(),
+            // Ação do painel de Jira: circula o filtro e recarrega.
+            KeyCode::Char('f') if self.focus == Panel::Jira => {
+                self.jira_filter = self.jira_filter.next();
+                let _ = self.cmd_tx.send(WorkerCmd::FetchJira(self.jira_filter));
+            }
+            // Visões do painel de Jira: issues (padrão) / por pai / menções.
+            KeyCode::Char('p') if self.focus == Panel::Jira => {
+                self.jira_view = JiraView::ByParent;
+                self.jira.cursor = 0;
+            }
+            KeyCode::Char('n') if self.focus == Panel::Jira => {
+                self.jira_view = JiraView::Mentions;
+                self.jira_mentions.cursor = 0;
+                // Menções têm dados próprios; busca na primeira vez e no refresh.
+                if !self.jira_mentions.loaded {
+                    let _ = self.cmd_tx.send(WorkerCmd::FetchJiraMentions);
+                }
+            }
+            KeyCode::Esc if self.focus == Panel::Jira => {
+                self.jira_view = JiraView::Issues;
+            }
             _ => {}
         }
     }
@@ -393,6 +604,7 @@ impl Model for App {
             Msg::AgendaLoaded(res) => self.agenda.set(res),
             Msg::PullsLoaded(res) => self.pulls.set(res),
             Msg::JiraLoaded(res) => self.jira.set(res),
+            Msg::JiraMentions(res) => self.jira_mentions.set(res),
             Msg::TasksLoaded(res) => self.tasks.set(res),
             Msg::EmailBody(res) => {
                 if let Some(d) = &mut self.detail {
@@ -434,6 +646,18 @@ mod tests {
         }
     }
 
+    fn jira_item(key: &str) -> JiraItem {
+        JiraItem {
+            key: key.into(),
+            summary: "s".into(),
+            status: "st".into(),
+            project: "P".into(),
+            url: "u".into(),
+            parent: None,
+            role: crate::data::jira::JiraRole::default(),
+        }
+    }
+
     #[test]
     fn tab_cycles_focus_forward_and_back() {
         let mut app = test_app();
@@ -450,6 +674,218 @@ mod tests {
         assert_eq!(app.focus, Panel::Email);
         app.update(key(KeyCode::BackTab));
         assert_eq!(app.focus, Panel::Tasks);
+    }
+
+    #[test]
+    fn p_and_n_switch_jira_views_and_esc_returns() {
+        let mut app = test_app();
+        app.update(key(KeyCode::Tab)); // Email -> Jira
+        assert_eq!(app.jira_view, JiraView::Issues);
+
+        // Cursor fora do zero antes de trocar de visão: senão `cursor == 0`
+        // passaria mesmo sem reset nenhum, e não provaria nada.
+        app.jira.items = vec![jira_item("A-1"), jira_item("A-2"), jira_item("A-3")];
+        app.jira.cursor = 2;
+
+        app.update(key(KeyCode::Char('p')));
+        assert_eq!(app.jira_view, JiraView::ByParent);
+        assert_eq!(app.jira.cursor, 0, "trocar para por-pai reseta o cursor");
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.jira_view, JiraView::Issues);
+
+        app.jira_mentions.cursor = 3;
+        app.update(key(KeyCode::Char('n')));
+        assert_eq!(app.jira_view, JiraView::Mentions);
+        assert_eq!(app.jira_mentions.cursor, 0, "trocar para menções reseta o cursor");
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.jira_view, JiraView::Issues, "Esc sempre volta para issues");
+    }
+
+    #[test]
+    fn mentions_view_moves_its_own_cursor_not_issues_cursor() {
+        // Cobre o roteamento de `jira_panel_data`/`open_selected_issue` pela
+        // visão ativa: sem ele, `j`/`k` na visão de menções moveriam o cursor
+        // de `jira` (que fica escondido) e o cursor exibido nunca se moveria.
+        let mut app = test_app();
+        app.focus = Panel::Jira;
+        app.jira.items = vec![jira_item("A-1"), jira_item("A-2")];
+        app.jira.cursor = 1; // valor conhecido, não deve mudar
+        app.jira_mentions.items = vec![jira_item("M-1"), jira_item("M-2"), jira_item("M-3")];
+
+        app.update(key(KeyCode::Char('n')));
+        assert_eq!(app.jira_view, JiraView::Mentions);
+        assert_eq!(app.jira_mentions.cursor, 0);
+
+        app.update(key(KeyCode::Char('j')));
+        assert_eq!(app.jira_mentions.cursor, 1, "j na visão de menções move jira_mentions.cursor");
+        assert_eq!(app.jira.cursor, 1, "cursor de issues não deve ser afetado");
+    }
+
+    /// Um envelope de teste; o `unread` é o que decide o `Space`.
+    fn email_item(id: &str, unread: bool) -> EmailItem {
+        EmailItem {
+            id: id.into(),
+            account: Account::Personal,
+            from: "alguem".into(),
+            subject: "assunto".into(),
+            unread,
+            date: "2026-08-04 10:00+00:00".into(),
+        }
+    }
+
+    /// Tarefa com duas subtarefas, a primeira concluída.
+    fn task_with_subs(id: &str) -> TaskItem {
+        let mut t = task(id, "com etapas", false);
+        t.subtasks = vec![
+            crate::data::tasks::SubTask {
+                id: format!("{id}-s1"),
+                title: "primeira".into(),
+                completed: true,
+            },
+            crate::data::tasks::SubTask {
+                id: format!("{id}-s2"),
+                title: "segunda".into(),
+                completed: false,
+            },
+        ];
+        t
+    }
+
+    #[test]
+    fn enter_expands_only_tasks_that_have_subtasks() {
+        let (mut app, _rx) = task_app(vec![task_with_subs("T1"), task("T2", "sem etapas", false)]);
+
+        app.update(key(KeyCode::Enter));
+        assert!(app.tasks_expanded.contains("T1"), "expande a que tem etapas");
+        app.update(key(KeyCode::Enter));
+        assert!(!app.tasks_expanded.contains("T1"), "Enter de novo recolhe");
+
+        // Cursor na segunda tarefa, que não tem etapas: nada acontece.
+        app.tasks.cursor = 1;
+        app.update(key(KeyCode::Enter));
+        assert!(app.tasks_expanded.is_empty());
+    }
+
+    #[test]
+    fn expanding_reanchors_the_cursor_on_the_task_not_the_index() {
+        // Com a primeira expandida, a segunda tarefa desce duas linhas. Recolher
+        // pelo cursor na própria tarefa tem de voltar o cursor para ela.
+        let (mut app, _rx) = task_app(vec![task_with_subs("T1"), task("T2", "outra", false)]);
+        app.update(key(KeyCode::Enter)); // expande T1, cursor volta para a linha de T1
+        assert_eq!(app.tasks.cursor, 0);
+        app.tasks.cursor = 3; // linha de T2 (T1, S1, S2, T2)
+        app.update(key(KeyCode::Enter)); // T2 não tem etapas: nada muda
+        assert_eq!(app.tasks.cursor, 3);
+    }
+
+    #[test]
+    fn cursor_reaches_the_subtask_rows_of_the_last_task() {
+        // Com uma tarefa só e duas etapas há 3 linhas. Se o cursor limitasse ao
+        // número de tarefas (1), as etapas seriam inalcançáveis por `j`.
+        let (mut app, _rx) = task_app(vec![task_with_subs("T1")]);
+        app.update(key(KeyCode::Enter)); // expande
+        app.update(key(KeyCode::Char('j')));
+        assert_eq!(app.tasks.cursor, 1);
+        app.update(key(KeyCode::Char('j')));
+        assert_eq!(app.tasks.cursor, 2, "chega na última etapa");
+        app.update(key(KeyCode::Char('j')));
+        assert_eq!(app.tasks.cursor, 2, "e não passa dela");
+        app.update(key(KeyCode::Char('G')));
+        assert_eq!(app.tasks.cursor, 2, "G vai para a última linha, não a última tarefa");
+    }
+
+    #[test]
+    fn space_on_a_subtask_row_toggles_the_subtask_not_the_task() {
+        let (mut app, rx) = task_app(vec![task_with_subs("T1")]);
+        app.update(key(KeyCode::Enter)); // expande
+        app.tasks.cursor = 2; // segunda subtarefa, ainda não concluída
+        app.update(key(KeyCode::Char(' ')));
+        match rx.try_recv() {
+            Ok(WorkerCmd::SubTaskToggle {
+                task_id,
+                item_id,
+                check,
+            }) => {
+                assert_eq!(task_id, "T1");
+                assert_eq!(item_id, "T1-s2");
+                assert!(check, "estava desmarcada, então marca");
+            }
+            other => panic!("esperava SubTaskToggle, veio outro comando: {}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn m_opens_the_folder_picker_and_j_k_walk_it() {
+        let mut app = test_app();
+        app.emails.items = vec![email_item("42", false)];
+        app.emails.loaded = true;
+        assert_eq!(app.focus, Panel::Email);
+
+        app.update(key(KeyCode::Char('m')));
+        match &app.prompt {
+            Some(Prompt::PickFolder { id, cursor, .. }) => {
+                assert_eq!(id, "42");
+                assert_eq!(*cursor, 0);
+            }
+            _ => panic!("esperava PickFolder"),
+        }
+        app.update(key(KeyCode::Char('j')));
+        assert!(matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 1, .. })));
+        app.update(key(KeyCode::Char('k')));
+        assert!(matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 0, .. })));
+        // Não passa do início nem do fim.
+        app.update(key(KeyCode::Char('k')));
+        assert!(matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 0, .. })));
+        app.update(key(KeyCode::Esc));
+        assert!(app.prompt.is_none(), "Esc fecha sem mover");
+    }
+
+    #[test]
+    fn d_on_email_asks_before_deleting_and_n_cancels() {
+        let mut app = test_app();
+        app.emails.items = vec![email_item("9", false)];
+        app.emails.loaded = true;
+
+        app.update(key(KeyCode::Char('d')));
+        assert!(
+            matches!(&app.prompt, Some(Prompt::ConfirmEmailDelete { subject, .. }) if subject == "assunto"),
+            "excluir e-mail sempre pede confirmação"
+        );
+        app.update(key(KeyCode::Char('n')));
+        assert!(app.prompt.is_none());
+    }
+
+    #[test]
+    fn email_keys_do_not_leak_into_the_tasks_panel() {
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", true)];
+        app.emails.loaded = true;
+        // Tab até Tarefas: `m` e `d` ali não podem abrir prompt de e-mail.
+        for _ in 0..4 {
+            app.update(key(KeyCode::Tab));
+        }
+        assert_eq!(app.focus, Panel::Tasks);
+        app.update(key(KeyCode::Char('m')));
+        assert!(app.prompt.is_none(), "`m` não faz nada fora do e-mail");
+    }
+
+    #[test]
+    fn f_cycles_the_jira_filter_only_when_jira_is_focused() {
+        let mut app = test_app();
+        assert_eq!(app.jira_filter, JiraFilter::Assignee);
+
+        // Sem foco no Jira, `f` não faz nada.
+        app.update(key(KeyCode::Char('f')));
+        assert_eq!(app.jira_filter, JiraFilter::Assignee);
+
+        app.update(key(KeyCode::Tab)); // Email -> Jira
+        assert_eq!(app.focus, Panel::Jira);
+        app.update(key(KeyCode::Char('f')));
+        assert_eq!(app.jira_filter, JiraFilter::Reporter);
+        app.update(key(KeyCode::Char('f')));
+        assert_eq!(app.jira_filter, JiraFilter::Both);
+        app.update(key(KeyCode::Char('f')));
+        assert_eq!(app.jira_filter, JiraFilter::Assignee, "o ciclo volta ao início");
     }
 
     #[test]
@@ -557,6 +993,7 @@ mod tests {
             id: id.into(),
             title: title.into(),
             completed,
+            subtasks: Vec::new(),
             due: String::new(),
             notes: String::new(),
         }

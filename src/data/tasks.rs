@@ -4,7 +4,40 @@
 //! `edit`/`delete`. O painel é interativo, então diferente de PRs/Jira aqui os
 //! itens são estruturados (precisamos do `id` para agir na tarefa selecionada).
 
+use std::collections::HashSet;
+
 use serde::Deserialize;
+
+/// Uma subtarefa: `checklistItem` no Graph, "etapa" na interface do To Do.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SubTask {
+    pub id: String,
+    pub title: String,
+    pub completed: bool,
+}
+
+/// Uma linha renderizada do painel: uma tarefa ou uma subtarefa dela.
+///
+/// Diferente do painel de Jira, aqui **toda** linha é selecionável, então o
+/// cursor indexa linhas direto, sem tradução. Expandir muda quantas linhas
+/// existem — quem expande precisa reancorar o cursor na tarefa, não no índice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRow {
+    Task(usize),
+    Sub { task: usize, sub: usize },
+}
+
+/// Achata as tarefas em linhas, intercalando as subtarefas das expandidas.
+pub fn rows(items: &[TaskItem], expanded: &HashSet<String>) -> Vec<TaskRow> {
+    let mut out = Vec::new();
+    for (t, item) in items.iter().enumerate() {
+        out.push(TaskRow::Task(t));
+        if expanded.contains(&item.id) {
+            out.extend((0..item.subtasks.len()).map(|sub| TaskRow::Sub { task: t, sub }));
+        }
+    }
+    out
+}
 
 /// Uma tarefa do Microsoft To Do.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -17,6 +50,9 @@ pub struct TaskItem {
     pub due: String,
     #[serde(default)]
     pub notes: String,
+    /// Etapas da tarefa; `[]` quando não há. Vêm embutidas no `mstodo list`.
+    #[serde(default)]
+    pub subtasks: Vec<SubTask>,
 }
 
 /// Parseia o JSON do `mstodo list` numa lista de tarefas.
@@ -47,6 +83,16 @@ pub fn add(title: &str) -> Result<(), String> {
 /// Edita o título de uma tarefa.
 pub fn edit(id: &str, title: &str) -> Result<(), String> {
     run(&["edit", id, title]).map(|_| ())
+}
+
+/// Marca uma subtarefa como concluída.
+pub fn check(task_id: &str, item_id: &str) -> Result<(), String> {
+    run(&["check", task_id, item_id]).map(|_| ())
+}
+
+/// Desmarca uma subtarefa.
+pub fn uncheck(task_id: &str, item_id: &str) -> Result<(), String> {
+    run(&["uncheck", task_id, item_id]).map(|_| ())
 }
 
 /// Apaga a tarefa.
@@ -90,6 +136,63 @@ mod tests {
         assert_eq!(tasks[0].due, "2026-06-10");
         assert!(tasks[1].completed);
         assert_eq!(tasks[1].notes, "obs");
+    }
+
+    // Forma da saída real de `mstodo list` com subtarefas; conteúdo inventado,
+    // porque o repo é público e a lista é pessoal.
+    const WITH_SUBS: &str = r#"[
+      {"id":"T1","title":"Trocar a instalação elétrica","completed":false,"due":"","notes":"",
+       "subtasks":[{"id":"S1","title":"Medir a fiação","completed":true},
+                   {"id":"S2","title":"Comprar disjuntor","completed":false}]},
+      {"id":"T2","title":"Sem etapas","completed":false,"due":"","notes":"","subtasks":[]}
+    ]"#;
+
+    #[test]
+    fn parses_subtasks_keeping_their_state() {
+        let tasks = parse_tasks(WITH_SUBS).unwrap();
+        assert_eq!(tasks[0].subtasks.len(), 2);
+        assert_eq!(tasks[0].subtasks[0].id, "S1");
+        assert!(tasks[0].subtasks[0].completed);
+        assert_eq!(tasks[0].subtasks[1].title, "Comprar disjuntor");
+        assert!(tasks[1].subtasks.is_empty());
+    }
+
+    #[test]
+    fn missing_subtasks_field_defaults_to_empty() {
+        // Um `mstodo` anterior não emitia o campo; o painel não deve quebrar.
+        let tasks = parse_tasks(r#"[{"id":"a","title":"t","completed":false}]"#).unwrap();
+        assert!(tasks[0].subtasks.is_empty());
+    }
+
+    #[test]
+    fn rows_are_one_per_task_when_nothing_is_expanded() {
+        let tasks = parse_tasks(WITH_SUBS).unwrap();
+        assert_eq!(
+            rows(&tasks, &HashSet::new()),
+            vec![TaskRow::Task(0), TaskRow::Task(1)]
+        );
+    }
+
+    #[test]
+    fn expanding_inserts_the_subtasks_right_below_their_task() {
+        let tasks = parse_tasks(WITH_SUBS).unwrap();
+        let expanded = HashSet::from(["T1".to_string()]);
+        assert_eq!(
+            rows(&tasks, &expanded),
+            vec![
+                TaskRow::Task(0),
+                TaskRow::Sub { task: 0, sub: 0 },
+                TaskRow::Sub { task: 0, sub: 1 },
+                TaskRow::Task(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn expanding_a_task_without_subtasks_adds_no_rows() {
+        let tasks = parse_tasks(WITH_SUBS).unwrap();
+        let expanded = HashSet::from(["T2".to_string()]);
+        assert_eq!(rows(&tasks, &expanded).len(), 2);
     }
 
     #[test]
