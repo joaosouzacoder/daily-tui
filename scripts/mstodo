@@ -73,7 +73,14 @@ def save_cache(token_cache):
     if not token_cache.has_state_changed:
         return
     TOKEN.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN.write_text(token_cache.serialize(), encoding="utf-8")
+    # `os.open` com 0600 em vez de `write_text` + `chmod`: assim o arquivo nasce
+    # restrito, sem a janela em que ele existe com a permissão do umask.
+    # No Windows o modo é ignorado e a proteção vem da ACL do perfil do usuário.
+    fd = os.open(TOKEN, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write(token_cache.serialize())
+    # O modo do `os.open` só vale na criação — o chmod corrige um cache que já
+    # existia (escrito por uma versão anterior deste script) sob outro umask.
     if os.name != "nt":
         TOKEN.chmod(0o600)
 
@@ -245,4 +252,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Honra o contrato do docstring: toda falha é UMA linha no stderr. Sem isto,
+    # uma queda de rede (`ConnectionError`/`Timeout`/DNS) vira traceback e o
+    # painel do daily-tui mostra só o cabeçalho dele.
+    #
+    # `SystemExit` — o que `die()` levanta — herda de BaseException, e não de
+    # Exception, então NÃO cai neste except: as mensagens deliberadas continuam
+    # passando intactas (idem `KeyboardInterrupt`).
+    try:
+        main()
+    except Exception as exc:
+        die(f"{type(exc).__name__}: {exc}")

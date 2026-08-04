@@ -102,6 +102,41 @@ mod tests {
         assert!(parse_tasks("nope").is_err());
     }
 
+    /// O `mstodo` promete UMA linha no stderr para qualquer falha — o painel só
+    /// mostra o resumo (`stderr_summary`), e traceback não ajuda. Aqui o helper
+    /// roda de verdade com um diretório no lugar do cache de token: o
+    /// `read_text` estoura antes de qualquer chamada de rede (`PermissionError`
+    /// no Windows, `IsADirectoryError` no Unix), então o teste é offline.
+    ///
+    /// Precisa do `uv` no PATH (é como o helper é executado); sem ele, o teste
+    /// não tem o que exercitar e passa.
+    #[test]
+    fn mstodo_reports_an_unexpected_failure_as_a_single_line() {
+        use std::process::Command;
+        if Command::new("uv").arg("--version").output().is_err() {
+            eprintln!("uv ausente — contrato de uma linha do mstodo não exercitado");
+            return;
+        }
+        let root = env!("CARGO_MANIFEST_DIR");
+        let out = Command::new("uv")
+            .args(["run", "--script", "scripts/mstodo", "list"])
+            .current_dir(root)
+            .env("MSTODO_TOKEN", std::env::temp_dir())
+            .env("DAILY_TUI_TODO_CLIENT_ID", "test-client-id")
+            .output()
+            .expect("uv run --script scripts/mstodo");
+
+        assert!(!out.status.success(), "o helper deveria falhar");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(err.lines().count(), 1, "stderr não é uma linha só:\n{err}");
+        assert!(!err.contains("Traceback"), "stderr traz traceback:\n{err}");
+        // E o painel mostra a exceção, não o cabeçalho do traceback.
+        assert!(
+            super::super::stderr_summary(&err).contains("Error: "),
+            "resumo sem a exceção:\n{err}"
+        );
+    }
+
     // Item real de `mstodo list` (Microsoft Graph): id longo, due/notes vazios.
     #[test]
     fn parses_real_mstodo_output() {
