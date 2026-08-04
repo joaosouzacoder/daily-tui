@@ -139,9 +139,11 @@ O roteiro do portal fica registrado como plano B:
 - **Renovação:** `acquire_token_silent` usa o refresh token do cache
 - **Cache:** `msal.SerializableTokenCache` em `<home>/.local/share/daily-tui/mstodo-personal.json`, `chmod 0600` no Unix
 
-Os dois caminhos usam `Path.home()`, a mesma convenção do `gtasks` — nos dois
-sistemas, inclusive no Windows (`%USERPROFILE%\.local\share\daily-tui\`), como o
-`google-auth.ps1` já pressupõe hoje.
+Os dois caminhos usam `Path.home()`, então o cache fica em
+`~/.local/share/daily-tui/` nos dois sistemas, inclusive no Windows
+(`%USERPROFILE%\.local\share\daily-tui\`) — o mesmo diretório que o helper
+`gtasks` usava, para as credenciais do daily-tui não se espalharem em dois
+lugares.
 
 Device code em vez de redirect para `localhost` por decisão deliberada: o
 incidente de hoje com o himalaya mostrou que o fluxo de redirect no Windows
@@ -173,6 +175,11 @@ produzido por `stderr_summary`:
 - `lista '<nome>' não encontrada`
 - `Graph <status>: <mensagem do campo error.message>`
 
+O inesperado também: o `main()` do helper captura `Exception` e a reduz a
+`<TipoDoErro>: <mensagem>`, senão uma queda de rede (`ConnectionError`,
+`Timeout`, DNS) sairia como traceback e o painel mostraria só o cabeçalho dele.
+`SystemExit` (o que o `die()` levanta) herda de `BaseException` e passa intacto.
+
 ## Testes e verificação
 
 - Os testes de `parse_tasks` em `tasks.rs` continuam válidos, porque o contrato
@@ -193,7 +200,7 @@ produzido por `stderr_summary`:
 | `scripts/gtasks`, `gtasks.cmd`   | apagar                                                      |
 | `scripts/install.sh`             | instalar `mstodo` no lugar do `gtasks`                      |
 | `scripts/setup-auth.sh`          | o alvo `google` passa a configurar só o gcalcli; novo trecho para o `mstodo`; tirar do preflight e dos probes |
-| `scripts/google-auth.ps1`        | remover o trecho de tarefas (fica só a agenda)              |
+| `scripts/google-auth.ps1`        | remover o trecho do `gtasks auth`; no lugar dele entrou o `mstodo auth` (device code) — é o único ponto de autenticação interativa que o Windows tem |
 | client OAuth do Google           | renomear `~/.config/daily-tui/gtasks-client-secret.json` → `google-client-secret.json`, com fallback para o nome antigo |
 | `scripts/daily-tui.env.example`  | trocar a seção `GTASKS_*` pelas variáveis novas             |
 | `README.md`                      | feature list, tabela de helpers, seção de setup, tabela de troubleshooting; sai a menção à "Google Tasks API" |

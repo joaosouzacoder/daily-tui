@@ -85,15 +85,26 @@ Garanta que `~/.local/bin` e `~/.cargo/bin` estão no seu `PATH` (o script avisa
 > 🪟 **Windows:** `install.sh` é só Linux/macOS. Depois de compilar (`cargo build
 > --release`), copie os helpers manualmente para `%USERPROFILE%\.local\bin`
 > (que já entra no `PATH`, e é de lá que o daily-tui os invoca por nome via
-> `cmd /C`):
-> ```
+> `cmd /C`). Os comandos abaixo são do **Prompt de Comando** (`cmd`) — não rode
+> no PowerShell, onde `if not exist` é erro de sintaxe e `%USERPROFILE%` não
+> expande:
+> ```bat
 > if not exist "%USERPROFILE%\.local\bin" mkdir "%USERPROFILE%\.local\bin"
 > copy scripts\mstodo* %USERPROFILE%\.local\bin\
+> copy scripts\jirapending* %USERPROFILE%\.local\bin\
 > ```
-> Os dois arquivos são necessários — o `.cmd` localiza o script Python irmão
-> pelo `%~dp0`. (O `copy` do `cmd` não aceita múltiplas origens soltas — só
-> concatenação com `+` — por isso o `*`; o `mkdir` evita o `copy` criar um
-> arquivo chamado `bin` se a pasta ainda não existir.)
+> São dois helpers, cada um com o seu shim `.cmd` — que localiza o script irmão
+> (o `mstodo` em Python, o `jirapending.ps1`) pelo `%~dp0`. (O `copy` do `cmd`
+> não aceita múltiplas origens soltas — só concatenação com `+` — por isso o
+> `*`; o `mkdir` evita o `copy` criar um arquivo chamado `bin` se a pasta ainda
+> não existir.)
+>
+> **Autenticar no Windows:** os `*.sh` não servem. Rode
+> `scripts\google-auth.cmd` (ou `powershell -File scripts\google-auth.ps1`): ele
+> faz o OAuth da **agenda** nas duas contas e, no fim, o **device code das
+> tarefas** (`mstodo auth`), com o client id vindo do `$TodoClientId` em
+> `scripts\daily-tui.config.ps1` (copie de `daily-tui.config.example.ps1`). O
+> passo das tarefas é pulado quando o token já existe.
 
 ---
 
@@ -256,6 +267,21 @@ o código e faça login com a conta pessoal. O token fica em
 
 Teste: `mstodo list` deve sair sem erro.
 
+> 🪟 **No Windows** o `setup-auth.sh` não roda: use `scripts\google-auth.cmd`,
+> que termina neste mesmo `mstodo auth` (o client id vem do `$TodoClientId` do
+> `scripts\daily-tui.config.ps1`, então não precisa exportar nada).
+
+> 🧹 **Vindo da versão com Google Tasks?** O painel de tarefas usava o helper
+> `gtasks` (Google Tasks) antes desta migração. O token dele **continua no disco,
+> com refresh token válido** — apague-o e revogue o acesso:
+>
+> 1. apague `~/.local/share/daily-tui/gtasks-personal.json`
+>    (`%USERPROFILE%\.local\share\daily-tui\gtasks-personal.json` no Windows);
+> 2. desabilite a **Google Tasks API** no seu projeto do Google Cloud
+>    (*APIs & Services → Enabled APIs*) — a Calendar API continua necessária;
+> 3. revogue o escopo do Tasks em
+>    [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+
 > 🔌 **Plano B.** O client acima é de terceiro (da Microsoft, não deste
 > projeto). Se um dia a Microsoft restringir o escopo `Tasks.ReadWrite` nele,
 > registre o seu, no portal Entra:
@@ -382,6 +408,6 @@ Primeiro recurso, sempre: **`./scripts/setup-auth.sh check`** — ele aponta qua
 | `Workspace`: login do e-mail recusado            | o admin do Workspace bloqueia apps OAuth de terceiros — use um OAuth client próprio.  |
 | Agenda vazia                                     | token do gcalcli daquela conta expirou — `XDG_DATA_HOME=... gcalcli list` ou `setup-auth.sh google`. |
 | `jirapending falhou`                             | `JIRA_EMAIL`/`JIRA_CLOUD`/`JIRA_TOKEN` ausentes ou token inválido.                    |
-| `mstodo: sem credenciais — rode: mstodo auth`    | falta autorizar; rode `mstodo auth` (ou `setup-auth.sh mstodo`).                     |
+| `mstodo: sem credenciais — rode: mstodo auth`    | falta autorizar; rode `mstodo auth` (ou `setup-auth.sh mstodo`; no Windows, `scripts\google-auth.cmd`). |
 | `client secret não encontrado`                   | baixe o OAuth client (Google Cloud) e rode `setup-auth.sh google`.                   |
 | Erro de compilação por OpenSSL                   | falta `libssl-dev`/`openssl-devel` — rode o `install.sh` sem `--skip-system`.        |
