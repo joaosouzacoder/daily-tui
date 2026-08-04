@@ -6,7 +6,8 @@ Painel TUI para deixar sempre rodando num monitor, com o que importa no dia a di
 - 📧 **E-mails** agregados das contas *work* + *personal* (via `himalaya`).
 - 📅 **Agenda** dos próximos 7 dias, agregada das duas contas Google (via `gcalcli`).
 - 🔀 **PRs/issues** pendentes nos repos monitorados (via `ghpending`).
-- 🎫 **Jira** com suas issues, agrupadas por projeto ou por pai, e as menções recentes (via `jira`).
+- 🎫 **Jira** com suas issues, agrupadas por projeto ou por pai (via `jira`).
+- 🔔 **Central de notificações** (`n`) com o que pede sua atenção — hoje as menções a você no Jira.
 - ✅ **Tarefas** do Microsoft To Do, com criar/concluir/editar/apagar pela TUI (via `mstodo`).
 
 Painel passivo com navegação leve: rola as listas e abre o corpo de um e-mail.
@@ -426,11 +427,11 @@ de agenda para aceitar, menções no GitHub — sem mudar o overlay.
 
 No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
 o filtro (`minhas` → `relator` → `ambas`) · `p` mostra as issues agrupadas por
-pai · `n` mostra as menções recentes · `Esc` volta para a visão de issues. O
-rodapé mostra essas teclas sempre que o painel de Jira (ou o de Tarefas) está
-em foco. No filtro `ambas`, cada issue ganha um marcador esmaecido —
-`[A]` assignee, `[R]` reporter, `[AR]` os dois — exceto na visão de menções,
-onde o papel não se aplica.
+pai · `Esc` volta para a visão de issues. O rodapé mostra essas teclas sempre que
+o painel de Jira (ou o de Tarefas) está em foco. No filtro `ambas`, cada issue
+ganha um marcador esmaecido — `[A]` assignee, `[R]` reporter, `[AR]` os dois —
+porque só ali a pergunta "sou responsável ou apenas relator disto?" tem resposta
+ambígua.
 
 ---
 
