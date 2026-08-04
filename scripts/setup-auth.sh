@@ -9,7 +9,7 @@
 #   email          — configura ortie + himalaya (Gmail/Workspace via OAuth2)
 #   google         — configura gcalcli (agenda) via OAuth do GCP
 #   mstodo         — configura mstodo (tarefas) via Microsoft To Do
-#   all            — email, depois google, depois check
+#   all            — email, depois google, depois mstodo, depois check
 #
 # Flags:
 #   --force        — sobrescreve configs existentes (ortie/himalaya) sem perguntar
@@ -181,11 +181,19 @@ EOF
 }
 
 # ---------------------------------------------------------------- mstodo ----
+# setup_mstodo [tolerant] — em `all`, "tolerant" faz a falta do client id só
+# avisar: com `set -e` um die() aqui mataria o script antes do doctor. Chamado
+# direto (`setup-auth.sh mstodo`), a variável ausente continua sendo erro.
 setup_mstodo() {
+  local tolerant="${1:-}"
   step "Tarefas (mstodo) — Microsoft To Do, conta pessoal"
   have mstodo || die "mstodo ausente — rode scripts/install.sh"
-  [[ -n "${DAILY_TUI_TODO_CLIENT_ID:-}" ]] \
-    || die "defina DAILY_TUI_TODO_CLIENT_ID (veja scripts/daily-tui.env.example)"
+  if [[ -z "${DAILY_TUI_TODO_CLIENT_ID:-}" ]]; then
+    local msg="defina DAILY_TUI_TODO_CLIENT_ID (veja scripts/daily-tui.env.example)"
+    [[ "$tolerant" == "tolerant" ]] || die "$msg"
+    warn "$msg — pulando as tarefas"
+    return 0
+  fi
 
   cat <<'EOF'
     O client padrão do daily-tui.env.example é o client público first-party da
@@ -219,5 +227,5 @@ case "$CMD" in
   email)  setup_email ;;
   google) setup_google ;;
   mstodo) setup_mstodo ;;
-  all)    setup_email; echo; setup_google; echo; setup_mstodo; echo; doctor ;;
+  all)    setup_email; echo; setup_google; echo; setup_mstodo tolerant; echo; doctor ;;
 esac

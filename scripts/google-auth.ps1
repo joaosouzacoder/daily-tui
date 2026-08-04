@@ -8,8 +8,11 @@
 #
 # Os e-mails de cada conta vem de daily-tui.config.ps1.
 #
-# Uso:  google-auth.ps1              # work + personal (agenda)
+# Uso:  google-auth.ps1              # work + personal (agenda) + tarefas
 #       google-auth.ps1 personal     # so a(s) conta(s) indicada(s): work|personal
+#
+# O passo das tarefas (Microsoft To Do) roda sempre no fim, e e pulado quando ja
+# existe token - veja o comentario da secao no rodape.
 param([string[]]$Accounts = @('work', 'personal'))
 $ErrorActionPreference = 'Continue'
 # Sem isto o Python segura a URL de login no buffer (stdout nao e um TTY) e ela
@@ -50,6 +53,30 @@ foreach ($acc in $Accounts) {
     New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
     Move-Item $canonical $dst -Force
     Write-Host "   token [$acc] salvo em $dst" -ForegroundColor DarkGray
+}
+
+# --- Tarefas: Microsoft To Do (mstodo) ---------------------------------------
+# Nao e auth do Google. Mora aqui porque este script e o unico ponto de entrada
+# de autenticacao interativa que o Windows tem: o setup-auth.sh e Linux/macOS.
+# O client id vem do daily-tui.config.ps1, igual ao daily-tui-launch.ps1.
+# (O PYTHONUNBUFFERED do topo tambem serve aqui: sem ele o codigo do device flow
+# fica preso no buffer do Python enquanto o processo espera o consentimento.)
+$todoToken = Join-Path $env:USERPROFILE '.local\share\daily-tui\mstodo-personal.json'
+Write-Host ""
+if (Test-Path $todoToken) {
+    Write-Host ">> Tarefas [mstodo] - token ja existe, nada a fazer." -ForegroundColor DarkGray
+    Write-Host "   (para refazer o consentimento, apague $todoToken)" -ForegroundColor DarkGray
+}
+elseif ([string]::IsNullOrWhiteSpace($TodoClientId)) {
+    Write-Warning "TodoClientId vazio em daily-tui.config.ps1 - painel de tarefas fica sem token."
+}
+else {
+    Write-Host ">> Tarefas [mstodo] - device code: abra a URL exibida e digite o codigo" -ForegroundColor Green
+    $env:DAILY_TUI_TODO_CLIENT_ID = $TodoClientId
+    & mstodo auth
+    if (-not (Test-Path $todoToken)) {
+        Write-Warning "mstodo auth nao gerou token; refaca este passo."
+    }
 }
 
 Write-Host ""
