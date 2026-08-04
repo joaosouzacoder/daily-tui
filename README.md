@@ -403,8 +403,8 @@ resto do painel continua funcionando.
 O rodapé mostra as teclas do painel em foco, então não é preciso decorar.
 
 No painel **E-mails**: `Enter` abre o corpo · `Espaço` marca lido/não lido ·
-`m` move para uma pasta · `d` exclui · `Shift`+`↑`/`↓` marca vários · `Esc` limpa
-a marcação. **Excluir move para a Lixeira**, não apaga do servidor — é
+`m` move para uma pasta · `d` exclui · `Shift`+`↑`/`↓` marca vários · `x` marca ou
+desmarca o de baixo do cursor · `Esc` limpa a marcação toda. **Excluir move para a Lixeira**, não apaga do servidor — é
 recuperável, e pede confirmação (`y`/`n`).
 
 **Ação em lote:** `Shift` com as setas marca uma faixa (as marcadas ganham `✓` e
@@ -412,7 +412,8 @@ o título do painel mostra a contagem), e a partir daí `Espaço`, `m` e `d` age
 sobre todas de uma vez, com uma re-busca só no fim. Num lote com estados mistos,
 `Espaço` marca tudo como lido — basta um não lido para a ação virar essa. Só as
 setas funcionam com `Shift`: o terminal entrega `Shift+j` como `J`, sem
-modificador.
+modificador. O `Shift` só marca — para tirar um item da faixa sem desfazer o
+resto, use `x`.
 
 **As pastas do seletor vêm do servidor**, não de uma lista fixa — no Gmail isso
 inclui todas as suas etiquetas (40 na conta do autor), com as canônicas primeiro

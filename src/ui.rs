@@ -663,7 +663,7 @@ fn fit_footer(
 
 fn panel_hints(focus: Panel) -> &'static str {
     match focus {
-        Panel::Email => "shift+↑↓ marca · espaço lido · m move · d exclui",
+        Panel::Email => "shift+↑↓ marca · x alterna · espaço lido · m move · d exclui",
         Panel::Jira => "f filtro · p por-pai · esc volta",
         Panel::Tasks => "enter expande · espaço alterna · a nova · e edita · d apaga",
         _ => "",

@@ -379,6 +379,19 @@ impl App {
         }
     }
 
+    /// Alterna a marcação do e-mail sob o cursor.
+    ///
+    /// O `Shift`+setas só marca — precisa existir uma forma de desmarcar um item
+    /// sem limpar a faixa inteira, e é esta.
+    fn toggle_mark(&mut self) {
+        let Some(item) = self.emails.items.get(self.emails.cursor) else {
+            return;
+        };
+        if !self.emails_marked.remove(&item.id) {
+            self.emails_marked.insert(item.id.clone());
+        }
+    }
+
     /// Estende a marcação em faixa: marca o e-mail sob o cursor, move, e marca o
     /// novo. Assim segurar `Shift` e andar deixa marcado tudo por onde passou.
     fn extend_mark(&mut self, delta: isize) {
@@ -685,6 +698,7 @@ impl App {
                 let _ = self.cmd_tx.send(WorkerCmd::RefreshAll);
             }
             // Ações do painel de tarefas (só quando ele está focado).
+            KeyCode::Char('x') if self.focus == Panel::Email => self.toggle_mark(),
             KeyCode::Char(' ') if self.focus == Panel::Email => self.toggle_email_seen(),
             KeyCode::Char('m') if self.focus == Panel::Email => self.open_move_email(),
             KeyCode::Char('d') if self.focus == Panel::Email => self.open_delete_email(),
@@ -923,6 +937,28 @@ mod tests {
             }
             other => panic!("esperava SubTaskToggle, veio outro comando: {}", other.is_ok()),
         }
+    }
+
+    #[test]
+    fn x_toggles_the_mark_of_a_single_email() {
+        // Shift+setas só marca; desmarcar um item sem perder a faixa é o `x`.
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", true), email_item("2", true)];
+        app.emails.loaded = true;
+
+        app.update(key(KeyCode::Char('x')));
+        assert!(app.emails_marked.contains("1"));
+        app.update(key(KeyCode::Char('x')));
+        assert!(app.emails_marked.is_empty(), "o mesmo `x` desmarca");
+
+        // Marca a faixa e desmarca só um, sem mexer no outro.
+        let shift_down = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+        app.emails.cursor = 0;
+        app.update(Msg::Key(shift_down));
+        assert_eq!(app.emails_marked.len(), 2);
+        app.update(key(KeyCode::Char('x')));
+        assert_eq!(app.emails_marked.len(), 1, "sai só o do cursor");
+        assert!(app.emails_marked.contains("1"), "o outro fica marcado");
     }
 
     #[test]
