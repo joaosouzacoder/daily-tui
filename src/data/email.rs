@@ -108,9 +108,37 @@ pub fn fetch(account: Account, limit: u32) -> Result<Vec<EmailItem>, String> {
     parse_envelopes(&stdout, account)
 }
 
-/// Pastas oferecidas no seletor de "mover" — exatamente os aliases que a config
-/// do himalaya declara em cada conta.
-pub const FOLDERS: [&str; 6] = ["inbox", "sent", "drafts", "trash", "spam", "all"];
+/// Aliases que a config do himalaya declara; usados como fallback quando a
+/// listagem de pastas da conta falha.
+pub const FOLDER_ALIASES: [&str; 6] = ["inbox", "sent", "drafts", "trash", "spam", "all"];
+
+#[derive(Deserialize)]
+struct Folder {
+    name: String,
+}
+
+/// Pastas de verdade da conta — no Gmail, isso inclui todas as suas etiquetas.
+///
+/// Os aliases da config cobrem só as seis pastas canônicas, o que deixava de
+/// fora qualquer etiqueta criada por você. Aqui a lista vem do servidor.
+/// Ordenada com as canônicas primeiro e o resto em ordem alfabética, para o
+/// seletor não começar com uma etiqueta aleatória.
+pub fn folders(account: Account) -> Result<Vec<String>, String> {
+    let raw = run(&["folder", "list", "-a", account.himalaya_name(), "-o", "json"])?;
+    let mut names: Vec<String> = serde_json::from_str::<Vec<Folder>>(&raw)
+        .map_err(|e| format!("JSON inválido do himalaya: {e}"))?
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    names.sort_by_key(|n| {
+        let rank = FOLDER_ALIASES
+            .iter()
+            .position(|a| a.eq_ignore_ascii_case(n))
+            .unwrap_or(FOLDER_ALIASES.len());
+        (rank, n.to_lowercase())
+    });
+    Ok(names)
+}
 
 /// Excluir é mover para a Lixeira: recuperável, e é o que o Gmail espera.
 pub const DELETE_FOLDER: &str = "trash";
@@ -247,12 +275,12 @@ mod tests {
     fn delete_targets_the_trash_alias() {
         // Excluir é mover para a Lixeira, não apagar do servidor.
         assert_eq!(DELETE_FOLDER, "trash");
-        assert!(FOLDERS.contains(&DELETE_FOLDER));
+        assert!(FOLDER_ALIASES.contains(&DELETE_FOLDER));
     }
 
     #[test]
-    fn folders_are_the_aliases_the_config_declares() {
-        assert_eq!(FOLDERS, ["inbox", "sent", "drafts", "trash", "spam", "all"]);
+    fn folder_aliases_are_the_ones_the_config_declares() {
+        assert_eq!(FOLDER_ALIASES, ["inbox", "sent", "drafts", "trash", "spam", "all"]);
     }
 
     #[test]

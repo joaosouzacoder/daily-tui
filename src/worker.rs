@@ -18,26 +18,27 @@ const EMAIL_LIMIT: u32 = 50;
 pub enum WorkerCmd {
     /// Recarrega e-mails, agenda, PRs e tarefas.
     RefreshAll,
+    /// Busca as pastas de uma conta (uma vez por sessão; o App cacheia).
+    FetchFolders(Account),
     /// Busca o corpo de um e-mail para o overlay de detalhe.
     ReadEmail { account: Account, id: String },
     /// Busca as issues do Jira com o modo de filtro dado.
     FetchJira(JiraFilter),
     /// Busca as menções do Jira (visão própria, buscada sob demanda).
     FetchJiraMentions,
-    /// Escritas no e-mail; após executar, re-busca a lista das duas contas.
+    /// Escritas no e-mail; carregam a lista de alvos para a ação valer em lote
+    /// com uma re-busca só, em vez de uma por e-mail. Após executar, re-busca as
+    /// duas contas.
     EmailSetSeen {
-        account: Account,
-        id: String,
+        items: Vec<(Account, String)>,
         seen: bool,
     },
     EmailMove {
-        account: Account,
-        id: String,
+        items: Vec<(Account, String)>,
         folder: String,
     },
     EmailDelete {
-        account: Account,
-        id: String,
+        items: Vec<(Account, String)>,
     },
     /// Escrita no Microsoft To Do; após executar, re-busca a lista.
     TaskComplete(String),
@@ -87,19 +88,22 @@ pub fn spawn(
                     mentions_loaded = true;
                     let _ = ui.send(Msg::JiraMentions(jira::fetch_mentions()));
                 }
+                Ok(WorkerCmd::FetchFolders(account)) => {
+                    let _ = ui.send(Msg::FoldersLoaded(account, email::folders(account)));
+                }
                 Ok(WorkerCmd::ReadEmail { account, id }) => {
                     let _ = ui.send(Msg::EmailBody(email::fetch_body(account, &id)));
                 }
-                Ok(WorkerCmd::EmailSetSeen { account, id, seen }) => {
-                    mutate_emails(&ui, email::set_seen(account, &id, seen))
-                }
-                Ok(WorkerCmd::EmailMove {
-                    account,
-                    id,
-                    folder,
-                }) => mutate_emails(&ui, email::move_to(account, &id, &folder)),
-                Ok(WorkerCmd::EmailDelete { account, id }) => {
-                    mutate_emails(&ui, email::delete(account, &id))
+                Ok(WorkerCmd::EmailSetSeen { items, seen }) => mutate_emails(
+                    &ui,
+                    each(&items, |account, id| email::set_seen(account, id, seen)),
+                ),
+                Ok(WorkerCmd::EmailMove { items, folder }) => mutate_emails(
+                    &ui,
+                    each(&items, |account, id| email::move_to(account, id, &folder)),
+                ),
+                Ok(WorkerCmd::EmailDelete { items }) => {
+                    mutate_emails(&ui, each(&items, email::delete))
                 }
                 Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
                 Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),
@@ -147,6 +151,26 @@ fn refresh_all(ui: &ProgramHandle<Msg>, jira_filter: JiraFilter, mentions_loaded
 fn mutate_tasks(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
     let loaded = result.and_then(|()| tasks::fetch());
     let _ = ui.send(Msg::TasksLoaded(loaded));
+}
+
+/// Aplica a escrita em cada alvo e devolve o primeiro erro, se houver.
+///
+/// Segue nos demais depois de uma falha: numa ação em lote, o usuário prefere
+/// que os que dão para mover sejam movidos, e a re-busca mostra quem sobrou.
+fn each<F>(items: &[(Account, String)], op: F) -> Result<(), String>
+where
+    F: Fn(Account, &str) -> Result<(), String>,
+{
+    let mut first_err = None;
+    for (account, id) in items {
+        if let Err(e) = op(*account, id) {
+            first_err = first_err.or(Some(e));
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Aplica uma escrita no e-mail e re-busca a lista das duas contas — o painel

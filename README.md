@@ -403,11 +403,27 @@ resto do painel continua funcionando.
 O rodapé mostra as teclas do painel em foco, então não é preciso decorar.
 
 No painel **E-mails**: `Enter` abre o corpo · `Espaço` marca lido/não lido ·
-`m` move para uma pasta (`j`/`k` escolhem na lista) · `d` exclui. **Excluir move
-para a Lixeira**, não apaga do servidor — é recuperável, e pede confirmação
-(`y`/`n`). As pastas oferecidas são os aliases que a sua config do himalaya
-declara: `inbox`, `sent`, `drafts`, `trash`, `spam`, `all`. Toda escrita re-busca
-a lista das duas contas, para o painel refletir o servidor e não um palpite local.
+`m` move para uma pasta · `d` exclui · `Shift`+`↑`/`↓` marca vários · `Esc` limpa
+a marcação. **Excluir move para a Lixeira**, não apaga do servidor — é
+recuperável, e pede confirmação (`y`/`n`).
+
+**Ação em lote:** `Shift` com as setas marca uma faixa (as marcadas ganham `✓` e
+o título do painel mostra a contagem), e a partir daí `Espaço`, `m` e `d` agem
+sobre todas de uma vez, com uma re-busca só no fim. Num lote com estados mistos,
+`Espaço` marca tudo como lido — basta um não lido para a ação virar essa. Só as
+setas funcionam com `Shift`: o terminal entrega `Shift+j` como `J`, sem
+modificador.
+
+**As pastas do seletor vêm do servidor**, não de uma lista fixa — no Gmail isso
+inclui todas as suas etiquetas (40 na conta do autor), com as canônicas primeiro
+e o resto em ordem alfabética. A lista é buscada na primeira vez que você abre o
+seletor naquela conta e fica em cache pela sessão; enquanto não chega, o seletor
+diz que está buscando. Num lote com e-mails das duas contas, a lista é a da conta
+do primeiro alvo — um nome que só exista nela falha para os outros, e o erro
+aparece no painel.
+
+As escritas aparecem na tela **na hora** e a re-busca reconcilia depois. Se a
+escrita falhar, o erro aparece no painel e a lista volta ao que o servidor diz.
 
 No painel **Tarefas**: `Espaço` conclui/reabre · `a` cria · `e` edita · `d` apaga
 (confirma com `y`/`n`) · `Enter` expande/recolhe as subtarefas.

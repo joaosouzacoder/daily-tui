@@ -13,7 +13,7 @@ use crate::clock;
 use chrono::Datelike;
 use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
-use crate::data::{email, AgendaItem, TaskItem};
+use crate::data::{AgendaItem, TaskItem};
 
 /// Calcula o deslocamento de rolagem para manter o cursor visível.
 ///
@@ -123,7 +123,11 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let p = &app.emails;
     let unread = p.items.iter().filter(|e| e.unread).count();
-    let title = format!(" E-MAILS  {}/{} ", unread, p.items.len());
+    let title = if app.emails_marked.is_empty() {
+        format!(" E-MAILS  {}/{} ", unread, p.items.len())
+    } else {
+        format!(" E-MAILS  {}/{} · {} marcados ", unread, p.items.len(), app.emails_marked.len())
+    };
     let focused = app.focus == Panel::Email;
 
     let selected = focused.then_some(p.cursor);
@@ -137,14 +141,22 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
             } else {
                 theme.muted("·")
             };
+            // Marcado para ação em lote: o ✓ vem antes de tudo, para a faixa
+            // marcada ser lida de relance na coluna da esquerda.
+            let mark = if app.emails_marked.contains(&e.id) {
+                theme.accent("✓ ")
+            } else {
+                theme.span("  ")
+            };
             let line = Line::from(vec![
+                mark,
                 bullet,
                 theme.span(" "),
                 theme.muted(e.account.marker()),
                 theme.span(" "),
                 theme.span(clip(&e.from, 16)),
                 theme.muted(" — "),
-                theme.span(clip(&e.subject, 60)),
+                theme.span(clip(&e.subject, 58)),
             ]);
             highlight(line, theme, selected == Some(i))
         })
@@ -434,27 +446,48 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 Line::from(theme.muted("y: confirmar · n/Esc: cancelar")),
             ],
         ),
-        Prompt::PickFolder { cursor, .. } => {
+        Prompt::PickFolder {
+            folders, cursor, ..
+        } => {
+            // Uma conta do Gmail tem dezenas de etiquetas (40 na do autor), então
+            // a lista rola em torno do cursor em vez de tentar caber inteira.
+            const VISIBLE: usize = 12;
+            let title = if folders.is_empty() {
+                " Mover e-mail ".to_string()
+            } else {
+                format!(" Mover e-mail  {}/{} ", cursor + 1, folders.len())
+            };
             let mut lines = vec![Line::from(theme.muted("Mover para:")), Line::from("")];
-            lines.extend(email::FOLDERS.iter().enumerate().map(|(i, folder)| {
-                highlight(
-                    Line::from(vec![theme.span(format!("  {folder}"))]),
-                    theme,
-                    i == *cursor,
-                )
-            }));
+            if folders.is_empty() {
+                lines.push(Line::from(theme.muted("  buscando as pastas da conta…")));
+            }
+            let off = window(folders.len(), *cursor, cursor.saturating_sub(VISIBLE / 2), VISIBLE);
+            lines.extend(
+                folders
+                    .iter()
+                    .enumerate()
+                    .skip(off)
+                    .take(VISIBLE)
+                    .map(|(i, folder)| {
+                        highlight(
+                            Line::from(vec![theme.span(format!("  {}", clip(folder, 46)))]),
+                            theme,
+                            i == *cursor,
+                        )
+                    }),
+            );
             lines.push(Line::from(""));
             lines.push(Line::from(theme.muted(
                 "j/k: escolher · Enter: mover · Esc: cancelar",
             )));
-            (" Mover e-mail ".to_string(), lines)
+            (title, lines)
         }
-        Prompt::ConfirmEmailDelete { subject, .. } => (
+        Prompt::ConfirmEmailDelete { what, .. } => (
             " Excluir e-mail ".to_string(),
             vec![
                 Line::from(vec![
                     theme.muted("Mover para a Lixeira: \""),
-                    theme.span(clip(subject, 36)),
+                    theme.span(clip(what, 36)),
                     theme.muted("\"?"),
                 ]),
                 Line::from(""),
@@ -582,9 +615,55 @@ fn render_scrolled(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, line
 /// Teclas específicas do painel em foco, para as ações serem descobríveis.
 ///
 /// Só lista teclas que realmente existem em `handle_panel_key` hoje.
+/// Compõe o rodapé cabendo na largura, sem nunca perder `q sair`.
+///
+/// As dicas do painel vêm primeiro porque são as menos óbvias, mas num terminal
+/// estreito elas são cortadas da direita para a esquerda até o global caber — a
+/// tecla de sair é a única que precisa estar visível sempre. Contar caracteres à
+/// mão já custou dois testes vermelhos; aqui a largura decide.
+fn fit_footer(
+    theme: &BubbleTheme,
+    hints: &str,
+    globals: &[(&str, &str)],
+    width: usize,
+) -> Line<'static> {
+    // O `help_line` empresta dos `&str` recebidos; reconstruir com conteúdo
+    // próprio deixa a linha independente da vida dos argumentos.
+    let global: Line<'static> = Line::from(
+        theme
+            .help_line(globals.iter().copied())
+            .spans
+            .into_iter()
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect::<Vec<_>>(),
+    );
+    let global_len: usize = global.spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut segments: Vec<&str> = if hints.is_empty() {
+        Vec::new()
+    } else {
+        hints.split(" · ").collect()
+    };
+
+    // Corta dicas do fim até o conjunto caber junto do global.
+    while !segments.is_empty() {
+        let kept = segments.join(" · ").chars().count();
+        if kept + 3 + global_len <= width {
+            break;
+        }
+        segments.pop();
+    }
+
+    if segments.is_empty() {
+        return global;
+    }
+    let mut spans = vec![theme.span(segments.join(" · ")), theme.muted(" · ")];
+    spans.extend(global.spans);
+    Line::from(spans)
+}
+
 fn panel_hints(focus: Panel) -> &'static str {
     match focus {
-        Panel::Email => "espaço lido · m move · d exclui",
+        Panel::Email => "shift+↑↓ marca · espaço lido · m move · d exclui",
         Panel::Jira => "f filtro · p por-pai · esc volta",
         Panel::Tasks => "enter expande · espaço alterna · a nova · e edita · d apaga",
         _ => "",
@@ -612,28 +691,21 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
         ])
     } else {
         let hints = panel_hints(app.focus);
-        if hints.is_empty() {
-            theme.help_line([
+        let globals: &[(&str, &str)] = if hints.is_empty() {
+            &[
                 ("Tab", "painel"),
                 ("j/k", "rolar"),
                 ("Enter", "abrir"),
                 ("n", "notificações"),
                 ("r", "atualizar"),
                 ("q", "sair"),
-            ])
+            ]
         } else {
-            // As teclas do painel vêm primeiro: são as menos óbvias, e é por elas
-            // que este trecho existe. O texto global encurta para o essencial —
-            // `j/k` e `Enter` são o que qualquer um tenta primeiro, enquanto sair
-            // do programa é a única tecla que precisa estar sempre visível.
-            let mut spans = vec![theme.span(hints), theme.muted(" · ")];
-            spans.extend(
-                theme
-                    .help_line([("Tab", "painel"), ("n", "notificações"), ("q", "sair")])
-                    .spans,
-            );
-            Line::from(spans)
-        }
+            // Com dicas do painel na frente, o global encurta: `j/k` e `Enter`
+            // são o que qualquer um tenta primeiro.
+            &[("Tab", "painel"), ("n", "notificações"), ("q", "sair")]
+        };
+        fit_footer(theme, hints, globals, cols[0].width as usize)
     };
     frame.render_widget(Paragraph::new(help), cols[0]);
 
@@ -928,6 +1000,56 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(out.contains("Nada pedindo sua atenção"));
+    }
+
+    #[test]
+    fn folder_picker_lists_the_real_folders_and_says_when_still_loading() {
+        let mut app = test_app();
+        app.prompt = Some(Prompt::PickFolder {
+            items: vec![(crate::data::Account::Personal, "1".into())],
+            folders: Vec::new(),
+            cursor: 0,
+        });
+        assert!(render_to_string(&app, 120, 30).contains("buscando as pastas"));
+
+        app.prompt = Some(Prompt::PickFolder {
+            items: vec![(crate::data::Account::Personal, "1".into())],
+            folders: vec!["inbox".into(), "Clientes".into()],
+            cursor: 1,
+        });
+        let out = render_to_string(&app, 120, 30);
+        assert!(out.contains("Mover para:"));
+        assert!(out.contains("Clientes"), "etiqueta do usuário, não só os aliases");
+    }
+
+    #[test]
+    fn folder_picker_scrolls_around_the_cursor_with_many_labels() {
+        // A conta real tem 40 etiquetas: o seletor rola em vez de tentar desenhar
+        // todas de uma vez.
+        let folders: Vec<String> = (0..40).map(|i| format!("etiqueta-{i:02}")).collect();
+        let mut app = test_app();
+        app.prompt = Some(Prompt::PickFolder {
+            items: vec![(crate::data::Account::Personal, "1".into())],
+            folders,
+            cursor: 30,
+        });
+        let out = render_to_string(&app, 120, 30);
+        assert!(out.contains("31/40"), "o título situa onde você está");
+        assert!(out.contains("etiqueta-30"), "a etiqueta sob o cursor aparece");
+        assert!(!out.contains("etiqueta-00"), "as distantes não são desenhadas");
+    }
+
+    #[test]
+    fn footer_drops_panel_hints_before_losing_the_quit_key() {
+        // Em terminal estreito as dicas do painel são cortadas da direita para a
+        // esquerda; sair é a única tecla que precisa aparecer sempre.
+        let app = test_app(); // foco em E-mail, que tem dicas longas
+        for width in [70usize, 100, 160] {
+            let out = render_to_string(&app, width as u16, 30);
+            assert!(out.contains("sair"), "largura {width} perdeu o `q sair`");
+        }
+        // Na larga, as dicas do painel cabem junto.
+        assert!(render_to_string(&app, 160, 30).contains("marca"));
     }
 
     #[test]

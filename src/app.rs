@@ -11,7 +11,7 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
 use crate::data::jira::{JiraFilter, JiraItem, JiraView};
-use crate::data::{email, notify, tasks};
+use crate::data::{notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
 use crate::ui;
@@ -152,17 +152,20 @@ pub enum Prompt {
     Input { kind: InputKind, buffer: String },
     /// Confirmação de exclusão da tarefa selecionada.
     ConfirmDelete { id: String, title: String },
-    /// Escolha de pasta para mover o e-mail sob o cursor.
+    /// Escolha de pasta para mover os e-mails alvo (marcados, ou o do cursor).
+    ///
+    /// A lista vem do servidor da conta do primeiro alvo — no Gmail, isso inclui
+    /// as etiquetas. Vazia enquanto a busca não volta.
     PickFolder {
-        account: Account,
-        id: String,
+        items: Vec<(Account, String)>,
+        folders: Vec<String>,
         cursor: usize,
     },
-    /// Confirmação de exclusão do e-mail (move para a Lixeira).
+    /// Confirmação de exclusão dos e-mails alvo (move para a Lixeira).
     ConfirmEmailDelete {
-        account: Account,
-        id: String,
-        subject: String,
+        items: Vec<(Account, String)>,
+        /// O que mostrar na pergunta: o assunto, ou a contagem no lote.
+        what: String,
     },
 }
 
@@ -178,6 +181,10 @@ pub struct App {
     pub jira_filter: JiraFilter,
     /// Ids das tarefas com as subtarefas expandidas no painel.
     pub tasks_expanded: std::collections::HashSet<String>,
+    /// Ids dos e-mails marcados para ação em lote (`Shift`+setas marca).
+    pub emails_marked: std::collections::HashSet<String>,
+    /// Pastas por conta, buscadas uma vez por sessão para o seletor de "mover".
+    pub folders: std::collections::HashMap<Account, Vec<String>>,
     /// Visão ativa do painel de Jira (issues/por-pai/menções), circulada por
     /// `p`/`n`/`Esc`.
     pub jira_view: JiraView,
@@ -209,6 +216,8 @@ impl App {
             jira_filter: JiraFilter::default(),
             jira_view: JiraView::default(),
             tasks_expanded: std::collections::HashSet::new(),
+            emails_marked: std::collections::HashSet::new(),
+            folders: std::collections::HashMap::new(),
             jira_mentions: PanelData::new(),
             agenda: PanelData::new(),
             pulls: PanelData::new(),
@@ -309,16 +318,22 @@ impl App {
     /// travada. A re-busca que vem depois reconcilia — e se a escrita falhar, o
     /// erro aparece no painel e a lista volta ao que o servidor diz.
     fn toggle_email_seen(&mut self) {
-        let Some(item) = self.emails.items.get_mut(self.emails.cursor) else {
+        let items = self.email_targets();
+        if items.is_empty() {
             return;
-        };
-        // `unread` verdadeiro significa que falta a flag Seen: marcar.
-        let seen = item.unread;
-        let (account, id) = (item.account, item.id.clone());
-        item.unread = !seen;
-        let _ = self
-            .cmd_tx
-            .send(WorkerCmd::EmailSetSeen { account, id, seen });
+        }
+        // No lote com estados mistos, "marcar como lido" é o que se espera:
+        // basta um não lido para a ação virar marcar todos.
+        let ids: std::collections::HashSet<&String> = items.iter().map(|(_, id)| id).collect();
+        let seen = self
+            .emails
+            .items
+            .iter()
+            .any(|e| ids.contains(&e.id) && e.unread);
+        for e in self.emails.items.iter_mut().filter(|e| ids.contains(&e.id)) {
+            e.unread = !seen;
+        }
+        let _ = self.cmd_tx.send(WorkerCmd::EmailSetSeen { items, seen });
     }
 
     /// Abre a central de notificações. Busca as fontes que ainda não carregaram —
@@ -364,33 +379,85 @@ impl App {
         }
     }
 
-    /// Remove o e-mail da lista exibida, mantendo o cursor dentro dos limites.
-    /// A re-busca que vem depois é quem diz a verdade — isto é só a tela.
-    fn drop_email(&mut self, id: &str) {
-        self.emails.items.retain(|e| e.id != id);
+    /// Estende a marcação em faixa: marca o e-mail sob o cursor, move, e marca o
+    /// novo. Assim segurar `Shift` e andar deixa marcado tudo por onde passou.
+    fn extend_mark(&mut self, delta: isize) {
+        if let Some(item) = self.emails.items.get(self.emails.cursor) {
+            self.emails_marked.insert(item.id.clone());
+        }
+        self.emails.move_cursor(delta);
+        if let Some(item) = self.emails.items.get(self.emails.cursor) {
+            self.emails_marked.insert(item.id.clone());
+        }
+    }
+
+    /// Alvos de uma ação de e-mail: os marcados, ou o que está sob o cursor.
+    ///
+    /// Preserva a ordem da lista exibida, para o lote ser previsível.
+    fn email_targets(&self) -> Vec<(Account, String)> {
+        if self.emails_marked.is_empty() {
+            return self
+                .emails
+                .items
+                .get(self.emails.cursor)
+                .map(|e| vec![(e.account, e.id.clone())])
+                .unwrap_or_default();
+        }
+        self.emails
+            .items
+            .iter()
+            .filter(|e| self.emails_marked.contains(&e.id))
+            .map(|e| (e.account, e.id.clone()))
+            .collect()
+    }
+
+    /// Remove os e-mails da lista exibida e limpa a marcação, mantendo o cursor
+    /// dentro dos limites. A re-busca que vem depois é quem diz a verdade.
+    fn drop_emails(&mut self, items: &[(Account, String)]) {
+        let ids: std::collections::HashSet<&String> = items.iter().map(|(_, id)| id).collect();
+        self.emails.items.retain(|e| !ids.contains(&e.id));
+        self.emails_marked.clear();
         self.emails.clamp_cursor();
     }
 
-    /// Abre o seletor de pasta para o e-mail sob o cursor.
+    /// Abre o seletor de pasta para os alvos (marcados, ou o do cursor).
     fn open_move_email(&mut self) {
-        if let Some(item) = self.emails.items.get(self.emails.cursor) {
-            self.prompt = Some(Prompt::PickFolder {
-                account: item.account,
-                id: item.id.clone(),
-                cursor: 0,
-            });
+        let items = self.email_targets();
+        // A lista de pastas é a da conta do primeiro alvo. Num lote de contas
+        // diferentes, um nome que só existe numa delas falha para as outras — e o
+        // erro aparece no painel, que é o comportamento honesto aqui.
+        let Some(account) = items.first().map(|(a, _)| *a) else {
+            return;
+        };
+        let folders = self.folders.get(&account).cloned().unwrap_or_default();
+        if folders.is_empty() {
+            // Primeira vez nesta conta: abre o seletor mostrando que está
+            // buscando, e o resultado preenche a lista sem fechar o prompt.
+            let _ = self.cmd_tx.send(WorkerCmd::FetchFolders(account));
         }
+        self.prompt = Some(Prompt::PickFolder {
+            items,
+            folders,
+            cursor: 0,
+        });
     }
 
-    /// Pede confirmação antes de mover o e-mail para a Lixeira.
+    /// Pede confirmação antes de mover os alvos para a Lixeira.
     fn open_delete_email(&mut self) {
-        if let Some(item) = self.emails.items.get(self.emails.cursor) {
-            self.prompt = Some(Prompt::ConfirmEmailDelete {
-                account: item.account,
-                id: item.id.clone(),
-                subject: item.subject.clone(),
-            });
+        let items = self.email_targets();
+        if items.is_empty() {
+            return;
         }
+        let what = if items.len() == 1 {
+            self.emails
+                .items
+                .get(self.emails.cursor)
+                .map(|e| e.subject.clone())
+                .unwrap_or_default()
+        } else {
+            format!("{} e-mails marcados", items.len())
+        };
+        self.prompt = Some(Prompt::ConfirmEmailDelete { items, what });
     }
 
     /// Trata teclas quando o overlay de detalhe está aberto.
@@ -537,9 +604,11 @@ impl App {
                     _ => {}
                 }
             }
-            Some(Prompt::PickFolder { cursor, .. }) => match key.code {
+            Some(Prompt::PickFolder {
+                folders, cursor, ..
+            }) => match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    *cursor = (*cursor + 1).min(email::FOLDERS.len() - 1);
+                    *cursor = (*cursor + 1).min(folders.len().saturating_sub(1));
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     *cursor = cursor.saturating_sub(1);
@@ -567,22 +636,21 @@ impl App {
             }
             Some(Prompt::ConfirmDelete { id, .. }) => WorkerCmd::TaskDelete(id),
             Some(Prompt::PickFolder {
-                account,
-                id,
+                items,
+                folders,
                 cursor,
             }) => {
-                // Sai da lista na hora: o e-mail deixou a pasta atual, e esperar
-                // o IMAP para refletir isso faz a ação parecer ignorada.
-                self.drop_email(&id);
-                WorkerCmd::EmailMove {
-                    account,
-                    id,
-                    folder: email::FOLDERS[cursor.min(email::FOLDERS.len() - 1)].to_string(),
-                }
+                let Some(folder) = folders.get(cursor).cloned() else {
+                    return; // lista ainda vazia: nada a mover
+                };
+                // Saem da lista na hora: deixaram a pasta atual, e esperar o IMAP
+                // para refletir isso faz a ação parecer ignorada.
+                self.drop_emails(&items);
+                WorkerCmd::EmailMove { items, folder }
             }
-            Some(Prompt::ConfirmEmailDelete { account, id, .. }) => {
-                self.drop_email(&id);
-                WorkerCmd::EmailDelete { account, id }
+            Some(Prompt::ConfirmEmailDelete { items, .. }) => {
+                self.drop_emails(&items);
+                WorkerCmd::EmailDelete { items }
             }
             None => return,
         };
@@ -592,11 +660,17 @@ impl App {
     /// Trata teclas no modo painel (dashboard).
     fn handle_panel_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.should_quit = true,
             KeyCode::Tab => self.focus = self.focus.next(),
             KeyCode::BackTab => self.focus = self.focus.prev(),
+            // `Shift`+setas marca em faixa no painel de e-mails. Não existe
+            // `Shift+j`: o terminal entrega isso como `J`, sem modificador —
+            // com as setas o modificador chega de verdade.
+            KeyCode::Down if shift && self.focus == Panel::Email => self.extend_mark(1),
+            KeyCode::Up if shift && self.focus == Panel::Email => self.extend_mark(-1),
             KeyCode::Char('j') | KeyCode::Down => self.focused_scroll(1),
             KeyCode::Char('k') | KeyCode::Up => self.focused_scroll(-1),
             KeyCode::Char('g') | KeyCode::Home => self.focused_to_first(),
@@ -634,6 +708,8 @@ impl App {
             // A central de notificações é um overlay global: se abre de qualquer
             // painel, e vai receber outras fontes além do Jira.
             KeyCode::Char('n') => self.open_notifications(),
+            // No e-mail, `Esc` desfaz a marcação — é a saída do modo lote.
+            KeyCode::Esc if self.focus == Panel::Email => self.emails_marked.clear(),
             KeyCode::Esc if self.focus == Panel::Jira => {
                 self.jira_view = JiraView::Issues;
             }
@@ -671,6 +747,19 @@ impl Model for App {
             Msg::JiraLoaded(res) => self.jira.set(res),
             Msg::JiraMentions(res) => self.jira_mentions.set(res),
             Msg::TasksLoaded(res) => self.tasks.set(res),
+            Msg::FoldersLoaded(account, res) => {
+                match res {
+                    Ok(names) => {
+                        // Preenche o prompt já aberto, para o seletor sair do
+                        // "buscando…" sem o usuário reabrir.
+                        if let Some(Prompt::PickFolder { folders, .. }) = &mut self.prompt {
+                            *folders = names.clone();
+                        }
+                        self.folders.insert(account, names);
+                    }
+                    Err(e) => self.emails.error = Some(e),
+                }
+            }
             Msg::EmailBody(res) => {
                 if let Some(d) = &mut self.detail {
                     d.body = Some(res);
@@ -837,6 +926,66 @@ mod tests {
     }
 
     #[test]
+    fn shift_arrows_mark_a_run_and_esc_clears_it() {
+        let mut app = test_app();
+        app.emails.items = vec![
+            email_item("1", true),
+            email_item("2", true),
+            email_item("3", true),
+        ];
+        app.emails.loaded = true;
+
+        let shift_down = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+        app.update(Msg::Key(shift_down));
+        assert_eq!(app.emails_marked.len(), 2, "marca o de origem e o de destino");
+        assert_eq!(app.emails.cursor, 1);
+        app.update(Msg::Key(shift_down));
+        assert_eq!(app.emails_marked.len(), 3, "a faixa cresce por onde passa");
+
+        app.update(key(KeyCode::Esc));
+        assert!(app.emails_marked.is_empty(), "Esc sai do modo lote");
+    }
+
+    #[test]
+    fn actions_apply_to_the_marked_batch_not_just_the_cursor() {
+        let mut app = test_app();
+        app.emails.items = vec![
+            email_item("1", true),
+            email_item("2", false),
+            email_item("3", true),
+        ];
+        app.emails.loaded = true;
+        app.emails_marked = ["1".to_string(), "3".to_string()].into_iter().collect();
+
+        app.update(key(KeyCode::Char('d')));
+        match &app.prompt {
+            Some(Prompt::ConfirmEmailDelete { items, what }) => {
+                assert_eq!(items.len(), 2, "os dois marcados, não o do cursor");
+                assert_eq!(what, "2 e-mails marcados");
+            }
+            _ => panic!("esperava ConfirmEmailDelete"),
+        }
+        app.update(key(KeyCode::Char('y')));
+        assert_eq!(app.emails.items.len(), 1, "saem os dois da tela na hora");
+        assert_eq!(app.emails.items[0].id, "2");
+        assert!(app.emails_marked.is_empty(), "a marcação é consumida");
+    }
+
+    #[test]
+    fn batch_seen_marks_everything_read_when_any_is_unread() {
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", true), email_item("2", false)];
+        app.emails.loaded = true;
+        app.emails_marked = ["1".to_string(), "2".to_string()].into_iter().collect();
+
+        app.update(key(KeyCode::Char(' ')));
+        assert!(
+            app.emails.items.iter().all(|e| !e.unread),
+            "basta um não lido para a ação virar marcar todos como lidos"
+        );
+    }
+
+    #[test]
     fn space_on_email_flips_the_state_on_screen_immediately() {
         // A tela não espera o IMAP: o efeito aparece no mesmo frame.
         let mut app = test_app();
@@ -876,29 +1025,38 @@ mod tests {
     }
 
     #[test]
-    fn m_opens_the_folder_picker_and_j_k_walk_it() {
+    fn m_opens_the_folder_picker_and_j_k_walk_the_real_folders() {
         let mut app = test_app();
         app.emails.items = vec![email_item("42", false)];
         app.emails.loaded = true;
-        assert_eq!(app.focus, Panel::Email);
 
         app.update(key(KeyCode::Char('m')));
         match &app.prompt {
-            Some(Prompt::PickFolder { id, cursor, .. }) => {
-                assert_eq!(id, "42");
-                assert_eq!(*cursor, 0);
+            Some(Prompt::PickFolder { items, folders, .. }) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].1, "42");
+                assert!(folders.is_empty(), "abre vazio: a lista vem do servidor");
             }
             _ => panic!("esperava PickFolder"),
         }
+
+        // As pastas da conta chegam pelo worker e preenchem o prompt aberto.
+        app.update(Msg::FoldersLoaded(
+            Account::Personal,
+            Ok(vec!["inbox".into(), "Clientes".into(), "Faturas".into()]),
+        ));
+        assert!(matches!(&app.prompt, Some(Prompt::PickFolder { folders, .. }) if folders.len() == 3));
+
         app.update(key(KeyCode::Char('j')));
         assert!(matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 1, .. })));
-        app.update(key(KeyCode::Char('k')));
-        assert!(matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 0, .. })));
-        // Não passa do início nem do fim.
-        app.update(key(KeyCode::Char('k')));
-        assert!(matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 0, .. })));
+        app.update(key(KeyCode::Char('j')));
+        app.update(key(KeyCode::Char('j')));
+        assert!(
+            matches!(&app.prompt, Some(Prompt::PickFolder { cursor: 2, .. })),
+            "não passa do fim da lista"
+        );
         app.update(key(KeyCode::Esc));
-        assert!(app.prompt.is_none(), "Esc fecha sem mover");
+        assert!(app.prompt.is_none());
     }
 
     #[test]
@@ -909,7 +1067,7 @@ mod tests {
 
         app.update(key(KeyCode::Char('d')));
         assert!(
-            matches!(&app.prompt, Some(Prompt::ConfirmEmailDelete { subject, .. }) if subject == "assunto"),
+            matches!(&app.prompt, Some(Prompt::ConfirmEmailDelete { what, .. }) if what == "assunto"),
             "excluir e-mail sempre pede confirmação"
         );
         app.update(key(KeyCode::Char('n')));

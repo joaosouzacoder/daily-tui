@@ -104,7 +104,7 @@ fn strip_ansi(input: &str) -> String {
 }
 
 /// Conta de origem de um item (e-mail ou agenda).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Account {
     /// Conta de trabalho (Empresa).
     Work,

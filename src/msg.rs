@@ -24,6 +24,8 @@ pub enum Msg {
     JiraMentions(Result<Vec<JiraItem>, String>),
     /// Resultado da busca/escrita de tarefas (lista do mstodo, já atualizada).
     TasksLoaded(Result<Vec<TaskItem>, String>),
+    /// Pastas de uma conta, para o seletor de "mover" (inclui as etiquetas).
+    FoldersLoaded(crate::data::Account, Result<Vec<String>, String>),
     /// Corpo de um e-mail aberto no overlay de detalhe.
     EmailBody(Result<String, String>),
 }
