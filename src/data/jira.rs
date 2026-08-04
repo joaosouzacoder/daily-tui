@@ -132,7 +132,6 @@ pub enum JiraView {
     #[default]
     Issues,
     ByParent,
-    Mentions,
 }
 
 /// Agrupa pelo pai (épico ou iniciativa). As issues sem pai vão para um grupo

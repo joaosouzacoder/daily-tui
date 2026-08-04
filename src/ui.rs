@@ -53,6 +53,9 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
     if app.prompt.is_some() {
         render_prompt(app, frame, frame.area());
     }
+    if app.notifications.is_some() {
+        render_notifications(app, frame, frame.area());
+    }
 }
 
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -197,24 +200,19 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let (p, rows) = match app.jira_view {
         jira::JiraView::Issues => (&app.jira, jira::rows_by_project(&app.jira.items)),
         jira::JiraView::ByParent => (&app.jira, jira::rows_by_parent(&app.jira.items)),
-        jira::JiraView::Mentions => (
-            &app.jira_mentions,
-            jira::rows_by_project(&app.jira_mentions.items),
-        ),
     };
     let title = format!(
         " JIRA · {} · {} ",
         app.jira_filter.label(),
         match app.jira_view {
-            jira::JiraView::Issues => "[issues] por-pai menções",
-            jira::JiraView::ByParent => "issues [por-pai] menções",
-            jira::JiraView::Mentions => "issues por-pai [menções]",
+            jira::JiraView::Issues => "[issues] por-pai",
+            jira::JiraView::ByParent => "issues [por-pai]",
         }
     );
     let focused = app.focus == Panel::Jira;
     // O papel só explica algo no filtro `ambas`: nos outros, toda issue tem o
     // mesmo papel; em menções, a issue está ali por citação, não por papel.
-    let show_role = app.jira_filter == jira::JiraFilter::Both && app.jira_view != jira::JiraView::Mentions;
+    let show_role = app.jira_filter == jira::JiraFilter::Both;
 
     let selected = focused.then_some(p.cursor);
     let lines: Vec<Line> = rows
@@ -335,6 +333,63 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool) -> Line<'static>
         spans.push(theme.accent(short_date(&t.due)));
     }
     Line::from(spans)
+}
+
+/// Overlay da central de notificações.
+///
+/// Sobrepõe a tela como o detalhe de e-mail. Cada linha traz o marcador da fonte
+/// (`[JIRA]` hoje), então quando entrarem convites de agenda e menções do GitHub
+/// a lista continua legível sem mudar o layout.
+fn render_notifications(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let Some(view) = &app.notifications else { return };
+    let items = app.notification_items();
+
+    let title = format!(" NOTIFICAÇÕES  {} ", items.len());
+    let lines: Vec<Line> = if items.is_empty() {
+        let msg = if app.jira_mentions.loaded {
+            "Nada pedindo sua atenção."
+        } else {
+            "Buscando…"
+        };
+        vec![Line::from(theme.muted(msg))]
+    } else {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let line = Line::from(vec![
+                    theme.muted(n.source.marker()),
+                    theme.span(" "),
+                    theme.span(clip(&n.title, 52)),
+                    theme.muted("  "),
+                    theme.muted(clip(&n.context, 24)),
+                ]);
+                highlight(line, theme, i == view.cursor)
+            })
+            .collect()
+    };
+
+    let popup = centered_rect(76, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = theme.titled_modal_block(title);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+
+    let height = rows[0].height as usize;
+    let off = window(lines.len(), view.cursor, 0, height);
+    render_lines(frame, theme, rows[0], lines, off);
+    frame.render_widget(
+        Paragraph::new(Line::from(theme.muted(
+            "j/k: navegar · Enter: abrir no navegador · Esc/n: fechar",
+        ))),
+        rows[1],
+    );
 }
 
 /// Linha de uma subtarefa: indentada sob a tarefa, com o mesmo checkbox.
@@ -530,7 +585,7 @@ fn render_scrolled(frame: &mut Frame<'_>, theme: &BubbleTheme, inner: Rect, line
 fn panel_hints(focus: Panel) -> &'static str {
     match focus {
         Panel::Email => "espaço lido · m move · d exclui",
-        Panel::Jira => "f filtro · p por-pai · n menções · esc volta",
+        Panel::Jira => "f filtro · p por-pai · esc volta",
         Panel::Tasks => "enter expande · espaço alterna · a nova · e edita · d apaga",
         _ => "",
     }
@@ -562,6 +617,7 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 ("Tab", "painel"),
                 ("j/k", "rolar"),
                 ("Enter", "abrir"),
+                ("n", "notificações"),
                 ("r", "atualizar"),
                 ("q", "sair"),
             ])
@@ -573,7 +629,7 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
             let mut spans = vec![theme.span(hints), theme.muted(" · ")];
             spans.extend(
                 theme
-                    .help_line([("Tab", "painel"), ("r", "atualizar"), ("q", "sair")])
+                    .help_line([("Tab", "painel"), ("n", "notificações"), ("q", "sair")])
                     .spans,
             );
             Line::from(spans)
@@ -836,6 +892,45 @@ mod tests {
     }
 
     #[test]
+    fn notifications_overlay_lists_each_source_with_its_marker() {
+        let mut app = test_app();
+        app.jira_mentions.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-101","summary":"Revisar o plano de capacidade","status":"Em andamento",
+                 "project":"ENG","url":"https://example.atlassian.net/browse/ENG-101","parent":null}]"#,
+        )
+        .unwrap();
+        app.jira_mentions.loaded = true;
+        app.notifications = Some(crate::app::NotificationsView { cursor: 0 });
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = (0..30)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("NOTIFICAÇÕES  1"), "título com a contagem");
+        assert!(out.contains("[JIRA]"), "marcador da fonte");
+        assert!(out.contains("Revisar o plano de capacidade"));
+        assert!(out.contains("ENG-101 · Em andamento"), "contexto da linha");
+    }
+
+    #[test]
+    fn notifications_overlay_says_when_there_is_nothing() {
+        let mut app = test_app();
+        app.jira_mentions.loaded = true;
+        app.notifications = Some(crate::app::NotificationsView { cursor: 0 });
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(&app, f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let out: String = (0..30)
+            .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("Nada pedindo sua atenção"));
+    }
+
+    #[test]
     fn footer_shows_the_keys_of_the_focused_panel() {
         let mut app = test_app();
         app.update(key(KeyCode::Tab)); // Email -> Jira
@@ -847,7 +942,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(out.contains("f filtro"), "o footer anuncia as teclas do Jira");
-        assert!(out.contains("n menções"));
+        assert!(out.contains("notificações"), "e o `n` global");
     }
 
     #[test]

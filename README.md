@@ -418,6 +418,12 @@ mostra marca nenhuma. Com as etapas à vista, o cursor anda por elas e o `Espaç
 age na linha sob o cursor: a tarefa, ou a etapa. Criar, editar e apagar continuam
 valendo só para tarefas.
 
+`n` abre a **central de notificações** de qualquer painel: um overlay com o que
+pede sua atenção, cada linha marcada pela fonte (`[JIRA]` hoje). `j`/`k` navegam,
+`Enter` abre no navegador, `Esc` ou `n` fecham. Hoje ela lista as menções a você
+no Jira dos últimos 30 dias; foi desenhada para receber outras fontes — convites
+de agenda para aceitar, menções no GitHub — sem mudar o overlay.
+
 No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
 o filtro (`minhas` → `relator` → `ambas`) · `p` mostra as issues agrupadas por
 pai · `n` mostra as menções recentes · `Esc` volta para a visão de issues. O

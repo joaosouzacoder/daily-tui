@@ -3,6 +3,7 @@
 pub mod agenda;
 pub mod email;
 pub mod jira;
+pub mod notify;
 pub mod pulls;
 pub mod tasks;
 

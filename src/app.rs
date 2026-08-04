@@ -11,7 +11,7 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
 use crate::data::jira::{JiraFilter, JiraItem, JiraView};
-use crate::data::{email, tasks};
+use crate::data::{email, notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
 use crate::ui;
@@ -123,6 +123,12 @@ impl<T> PanelData<T> {
     }
 }
 
+/// Overlay da central de notificações. A lista em si é derivada das fontes
+/// carregadas (`notification_items`), então aqui só vive a seleção.
+pub struct NotificationsView {
+    pub cursor: usize,
+}
+
 /// Overlay de detalhe de um e-mail.
 pub struct Detail {
     pub from: String,
@@ -185,6 +191,8 @@ pub struct App {
     pub last_refresh: Option<DateTime<Local>>,
     pub detail: Option<Detail>,
     pub prompt: Option<Prompt>,
+    /// Central de notificações aberta (overlay global, tecla `n`).
+    pub notifications: Option<NotificationsView>,
     cmd_tx: Sender<WorkerCmd>,
 }
 
@@ -211,17 +219,8 @@ impl App {
             last_refresh: None,
             detail: None,
             prompt: None,
+            notifications: None,
             cmd_tx,
-        }
-    }
-
-    /// `PanelData` de Jira sob o cursor na visão ativa: `jira_mentions` na
-    /// visão de menções (dados próprios), `jira` nas outras duas (issues e
-    /// por-pai só reagrupam o mesmo conjunto).
-    fn jira_panel_data(&mut self) -> &mut PanelData<JiraItem> {
-        match self.jira_view {
-            JiraView::Mentions => &mut self.jira_mentions,
-            JiraView::Issues | JiraView::ByParent => &mut self.jira,
         }
     }
 
@@ -229,7 +228,7 @@ impl App {
     fn focused_scroll(&mut self, delta: isize) {
         match self.focus {
             Panel::Email => self.emails.move_cursor(delta),
-            Panel::Jira => self.jira_panel_data().move_cursor(delta),
+            Panel::Jira => self.jira.move_cursor(delta),
             Panel::Agenda => self.agenda.scroll_by(delta),
             Panel::Pulls => self.pulls.scroll_by(delta),
             // Tarefas é o único painel onde o cursor indexa **linhas**, não
@@ -254,7 +253,7 @@ impl App {
     fn focused_to_first(&mut self) {
         match self.focus {
             Panel::Email => self.emails.to_first(),
-            Panel::Jira => self.jira_panel_data().to_first(),
+            Panel::Jira => self.jira.to_first(),
             Panel::Agenda => self.agenda.scroll.set(0),
             Panel::Pulls => self.pulls.scroll.set(0),
             Panel::Tasks => self.tasks.to_first(),
@@ -265,7 +264,7 @@ impl App {
         // Para listas roláveis, o valor grande é clampado ao máximo na render.
         match self.focus {
             Panel::Email => self.emails.to_last(),
-            Panel::Jira => self.jira_panel_data().to_last(),
+            Panel::Jira => self.jira.to_last(),
             Panel::Agenda => self.agenda.scroll.set(usize::MAX),
             Panel::Pulls => self.pulls.scroll.set(usize::MAX),
             // Idem: o fim da lista de Tarefas é a última linha, não a última tarefa.
@@ -295,31 +294,81 @@ impl App {
     /// qualquer outra falha de busca. Na visão de menções, a issue e o cursor
     /// vêm de `jira_mentions`, não de `jira` — são conjuntos de dados diferentes.
     fn open_selected_issue(&mut self) {
-        let url = match self.jira_view {
-            JiraView::Mentions => self.jira_mentions.items.get(self.jira_mentions.cursor).map(|i| i.url.clone()),
-            JiraView::Issues | JiraView::ByParent => self.jira.items.get(self.jira.cursor).map(|i| i.url.clone()),
-        };
-        let Some(url) = url else {
+        let Some(url) = self.jira.items.get(self.jira.cursor).map(|i| i.url.clone()) else {
             return;
         };
         if let Err(e) = crate::data::jira::open_url(&url) {
-            match self.jira_view {
-                JiraView::Mentions => self.jira_mentions.error = Some(e),
-                JiraView::Issues | JiraView::ByParent => self.jira.error = Some(e),
-            }
+            self.jira.error = Some(e);
         }
     }
 
     /// Alterna lido/não lido do e-mail sob o cursor.
+    ///
+    /// Aplica o efeito na tela na hora e só depois manda a escrita: reler as duas
+    /// contas por IMAP leva segundos, e esperar por isso faz a tecla parecer
+    /// travada. A re-busca que vem depois reconcilia — e se a escrita falhar, o
+    /// erro aparece no painel e a lista volta ao que o servidor diz.
     fn toggle_email_seen(&mut self) {
-        if let Some(item) = self.emails.items.get(self.emails.cursor) {
-            let _ = self.cmd_tx.send(WorkerCmd::EmailSetSeen {
-                account: item.account,
-                id: item.id.clone(),
-                // `unread` verdadeiro significa que falta a flag Seen: marcar.
-                seen: item.unread,
-            });
+        let Some(item) = self.emails.items.get_mut(self.emails.cursor) else {
+            return;
+        };
+        // `unread` verdadeiro significa que falta a flag Seen: marcar.
+        let seen = item.unread;
+        let (account, id) = (item.account, item.id.clone());
+        item.unread = !seen;
+        let _ = self
+            .cmd_tx
+            .send(WorkerCmd::EmailSetSeen { account, id, seen });
+    }
+
+    /// Abre a central de notificações. Busca as fontes que ainda não carregaram —
+    /// hoje só o Jira — para não pagar a consulta de quem nunca abre o overlay.
+    fn open_notifications(&mut self) {
+        self.notifications = Some(NotificationsView { cursor: 0 });
+        if !self.jira_mentions.loaded {
+            let _ = self.cmd_tx.send(WorkerCmd::FetchJiraMentions);
         }
+    }
+
+    /// Notificações de todas as fontes carregadas, na ordem em que aparecem.
+    pub fn notification_items(&self) -> Vec<notify::Notification> {
+        notify::from_jira_mentions(&self.jira_mentions.items)
+    }
+
+    /// Trata teclas com a central de notificações aberta.
+    fn handle_notifications_key(&mut self, key: KeyEvent) {
+        let total = self.notification_items().len();
+        let Some(view) = &mut self.notifications else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => self.notifications = None,
+            KeyCode::Char('j') | KeyCode::Down => {
+                if total > 0 {
+                    view.cursor = (view.cursor + 1).min(total - 1);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => view.cursor = view.cursor.saturating_sub(1),
+            KeyCode::Enter => {
+                let cursor = view.cursor;
+                let url = self
+                    .notification_items()
+                    .get(cursor)
+                    .map(|n| n.url.clone())
+                    .filter(|u| !u.is_empty());
+                if let Some(Err(e)) = url.map(|u| crate::data::jira::open_url(&u)) {
+                    self.jira_mentions.error = Some(e);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Remove o e-mail da lista exibida, mantendo o cursor dentro dos limites.
+    /// A re-busca que vem depois é quem diz a verdade — isto é só a tela.
+    fn drop_email(&mut self, id: &str) {
+        self.emails.items.retain(|e| e.id != id);
+        self.emails.clamp_cursor();
     }
 
     /// Abre o seletor de pasta para o e-mail sob o cursor.
@@ -379,25 +428,35 @@ impl App {
 
     /// Alterna o estado da linha sob o cursor — tarefa ou subtarefa.
     fn toggle_task(&mut self) {
+        // Como no e-mail: vira o estado na tela agora e deixa a re-busca
+        // reconciliar, senão a tecla parece travada enquanto o Graph responde.
         let cmd = match self.selected_row() {
-            Some(tasks::TaskRow::Task(t)) => match self.tasks.items.get(t) {
-                Some(item) if item.completed => WorkerCmd::TaskReopen(item.id.clone()),
-                Some(item) => WorkerCmd::TaskComplete(item.id.clone()),
-                None => return,
-            },
+            Some(tasks::TaskRow::Task(t)) => {
+                let Some(item) = self.tasks.items.get_mut(t) else {
+                    return;
+                };
+                let was_done = item.completed;
+                item.completed = !was_done;
+                if was_done {
+                    WorkerCmd::TaskReopen(item.id.clone())
+                } else {
+                    WorkerCmd::TaskComplete(item.id.clone())
+                }
+            }
             Some(tasks::TaskRow::Sub { task, sub }) => {
-                let pair = self
-                    .tasks
-                    .items
-                    .get(task)
-                    .and_then(|item| item.subtasks.get(sub).map(|s| (item, s)));
-                match pair {
-                    Some((item, s)) => WorkerCmd::SubTaskToggle {
-                        task_id: item.id.clone(),
-                        item_id: s.id.clone(),
-                        check: !s.completed,
-                    },
-                    None => return,
+                let Some(item) = self.tasks.items.get_mut(task) else {
+                    return;
+                };
+                let task_id = item.id.clone();
+                let Some(s) = item.subtasks.get_mut(sub) else {
+                    return;
+                };
+                let check = !s.completed;
+                s.completed = check;
+                WorkerCmd::SubTaskToggle {
+                    task_id,
+                    item_id: s.id.clone(),
+                    check,
                 }
             }
             None => return,
@@ -511,12 +570,18 @@ impl App {
                 account,
                 id,
                 cursor,
-            }) => WorkerCmd::EmailMove {
-                account,
-                id,
-                folder: email::FOLDERS[cursor.min(email::FOLDERS.len() - 1)].to_string(),
-            },
+            }) => {
+                // Sai da lista na hora: o e-mail deixou a pasta atual, e esperar
+                // o IMAP para refletir isso faz a ação parecer ignorada.
+                self.drop_email(&id);
+                WorkerCmd::EmailMove {
+                    account,
+                    id,
+                    folder: email::FOLDERS[cursor.min(email::FOLDERS.len() - 1)].to_string(),
+                }
+            }
             Some(Prompt::ConfirmEmailDelete { account, id, .. }) => {
+                self.drop_email(&id);
                 WorkerCmd::EmailDelete { account, id }
             }
             None => return,
@@ -563,14 +628,12 @@ impl App {
                 self.jira_view = JiraView::ByParent;
                 self.jira.cursor = 0;
             }
-            KeyCode::Char('n') if self.focus == Panel::Jira => {
-                self.jira_view = JiraView::Mentions;
-                self.jira_mentions.cursor = 0;
-                // Menções têm dados próprios; busca na primeira vez e no refresh.
-                if !self.jira_mentions.loaded {
-                    let _ = self.cmd_tx.send(WorkerCmd::FetchJiraMentions);
-                }
-            }
+            // `n` é global: notificação é coisa que se quer ver de onde você
+            // estiver, sem precisar focar o painel primeiro. Leva o foco para o
+            // Jira junto, senão as teclas de navegação agiriam no painel errado.
+            // A central de notificações é um overlay global: se abre de qualquer
+            // painel, e vai receber outras fontes além do Jira.
+            KeyCode::Char('n') => self.open_notifications(),
             KeyCode::Esc if self.focus == Panel::Jira => {
                 self.jira_view = JiraView::Issues;
             }
@@ -593,6 +656,8 @@ impl Model for App {
                     self.handle_detail_key(key);
                 } else if self.prompt.is_some() {
                     self.handle_prompt_key(key);
+                } else if self.notifications.is_some() {
+                    self.handle_notifications_key(key);
                 } else {
                     self.handle_panel_key(key);
                 }
@@ -646,18 +711,6 @@ mod tests {
         }
     }
 
-    fn jira_item(key: &str) -> JiraItem {
-        JiraItem {
-            key: key.into(),
-            summary: "s".into(),
-            status: "st".into(),
-            project: "P".into(),
-            url: "u".into(),
-            parent: None,
-            role: crate::data::jira::JiraRole::default(),
-        }
-    }
-
     #[test]
     fn tab_cycles_focus_forward_and_back() {
         let mut app = test_app();
@@ -677,48 +730,17 @@ mod tests {
     }
 
     #[test]
-    fn p_and_n_switch_jira_views_and_esc_returns() {
+    fn p_switches_to_the_by_parent_view_and_esc_returns() {
         let mut app = test_app();
         app.update(key(KeyCode::Tab)); // Email -> Jira
         assert_eq!(app.jira_view, JiraView::Issues);
-
-        // Cursor fora do zero antes de trocar de visão: senão `cursor == 0`
-        // passaria mesmo sem reset nenhum, e não provaria nada.
-        app.jira.items = vec![jira_item("A-1"), jira_item("A-2"), jira_item("A-3")];
         app.jira.cursor = 2;
 
         app.update(key(KeyCode::Char('p')));
         assert_eq!(app.jira_view, JiraView::ByParent);
-        assert_eq!(app.jira.cursor, 0, "trocar para por-pai reseta o cursor");
+        assert_eq!(app.jira.cursor, 0, "troca de visão reancora o cursor");
         app.update(key(KeyCode::Esc));
         assert_eq!(app.jira_view, JiraView::Issues);
-
-        app.jira_mentions.cursor = 3;
-        app.update(key(KeyCode::Char('n')));
-        assert_eq!(app.jira_view, JiraView::Mentions);
-        assert_eq!(app.jira_mentions.cursor, 0, "trocar para menções reseta o cursor");
-        app.update(key(KeyCode::Esc));
-        assert_eq!(app.jira_view, JiraView::Issues, "Esc sempre volta para issues");
-    }
-
-    #[test]
-    fn mentions_view_moves_its_own_cursor_not_issues_cursor() {
-        // Cobre o roteamento de `jira_panel_data`/`open_selected_issue` pela
-        // visão ativa: sem ele, `j`/`k` na visão de menções moveriam o cursor
-        // de `jira` (que fica escondido) e o cursor exibido nunca se moveria.
-        let mut app = test_app();
-        app.focus = Panel::Jira;
-        app.jira.items = vec![jira_item("A-1"), jira_item("A-2")];
-        app.jira.cursor = 1; // valor conhecido, não deve mudar
-        app.jira_mentions.items = vec![jira_item("M-1"), jira_item("M-2"), jira_item("M-3")];
-
-        app.update(key(KeyCode::Char('n')));
-        assert_eq!(app.jira_view, JiraView::Mentions);
-        assert_eq!(app.jira_mentions.cursor, 0);
-
-        app.update(key(KeyCode::Char('j')));
-        assert_eq!(app.jira_mentions.cursor, 1, "j na visão de menções move jira_mentions.cursor");
-        assert_eq!(app.jira.cursor, 1, "cursor de issues não deve ser afetado");
     }
 
     /// Um envelope de teste; o `unread` é o que decide o `Space`.
@@ -812,6 +834,45 @@ mod tests {
             }
             other => panic!("esperava SubTaskToggle, veio outro comando: {}", other.is_ok()),
         }
+    }
+
+    #[test]
+    fn space_on_email_flips_the_state_on_screen_immediately() {
+        // A tela não espera o IMAP: o efeito aparece no mesmo frame.
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", true)];
+        app.emails.loaded = true;
+
+        app.update(key(KeyCode::Char(' ')));
+        assert!(!app.emails.items[0].unread, "virou lido na hora");
+        app.update(key(KeyCode::Char(' ')));
+        assert!(app.emails.items[0].unread, "e volta a não lido");
+    }
+
+    #[test]
+    fn deleting_an_email_removes_it_from_the_list_immediately() {
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", false), email_item("2", false)];
+        app.emails.loaded = true;
+        app.emails.cursor = 1;
+
+        app.update(key(KeyCode::Char('d')));
+        app.update(key(KeyCode::Char('y'))); // confirma
+        assert_eq!(app.emails.items.len(), 1);
+        assert_eq!(app.emails.items[0].id, "1");
+        assert_eq!(app.emails.cursor, 0, "o cursor não fica fora dos limites");
+    }
+
+    #[test]
+    fn n_opens_the_notifications_overlay_from_any_panel() {
+        // Notificação se vê de onde estiver, e é overlay: não rouba o painel.
+        let mut app = test_app();
+        assert_eq!(app.focus, Panel::Email);
+        app.update(key(KeyCode::Char('n')));
+        assert!(app.notifications.is_some());
+        assert_eq!(app.focus, Panel::Email, "o painel focado não muda");
+        app.update(key(KeyCode::Esc));
+        assert!(app.notifications.is_none(), "Esc fecha a central");
     }
 
     #[test]
