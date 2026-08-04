@@ -45,19 +45,30 @@ pub fn force_utf8_stdout(cmd: &mut std::process::Command) {
 /// (`Note: Run with --trace…`) e o PowerShell com metadados do erro
 /// (`+ FullyQualifiedErrorId : …`) — o motivo real fica escondido.
 ///
-/// Duas formas cobertas, ambas vistas em falhas reais dos helpers:
+/// Três formas cobertas, todas vistas em falhas reais dos helpers:
 /// - cadeia de causas do himalaya (`Error:` seguido de `0: …`, `1: …`), onde a
 ///   causa mais funda é a específica ("cannot refresh access token…");
+/// - traceback de Python (`gcalcli`), onde a primeira linha é só o cabeçalho
+///   `Traceback (most recent call last):` e a exceção real é a última;
 /// - erro de uma linha só (PowerShell/`ghpending`), onde vale a primeira.
 ///
 /// Devolve texto sem escapes ANSI, ou uma nota quando o stderr nada diz.
 pub fn stderr_summary(raw: &str) -> String {
+    const PY_TRACEBACK: &str = "Traceback (most recent call last):";
+
     let clean = strip_ansi(raw);
     let meaningful: Vec<&str> = clean
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("Note:") && *l != "Error:")
         .collect();
+
+    // Traceback de Python: o Python pode encadear vários blocos ("The above
+    // exception was the direct cause of…"), e a exceção que de fato abortou o
+    // processo é sempre a última linha.
+    if meaningful.first() == Some(&PY_TRACEBACK) {
+        return meaningful.last().copied().unwrap_or(PY_TRACEBACK).to_string();
+    }
 
     // Causa mais funda da cadeia do himalaya, quando houver.
     let deepest_cause = meaningful
@@ -180,6 +191,20 @@ mod tests {
         assert_eq!(
             msg,
             "Invoke-RestMethod : The remote server returned an error: (400) Bad Request."
+        );
+    }
+
+    // Traceback real do `mstodo list` com `HTTPS_PROXY=http://127.0.0.1:9`
+    // (2026-08-03) — o mesmo cenário de uma queda de Wi-Fi. Capturado do stderr
+    // do helper; só os fins de linha foram normalizados para LF.
+    const MSTODO_PROXY_TRACEBACK: &str = include_str!("testdata/mstodo-proxy-traceback.txt");
+
+    #[test]
+    fn picks_the_exception_of_a_python_traceback_not_its_header() {
+        let msg = stderr_summary(MSTODO_PROXY_TRACEBACK);
+        assert_eq!(
+            msg,
+            "requests.exceptions.ProxyError: HTTPSConnectionPool(host='login.microsoftonline.com', port=443): Max retries exceeded with url: /consumers/v2.0/.well-known/openid-configuration (Caused by ProxyError('Unable to connect to proxy', NewConnectionError(\"HTTPSConnection(host='127.0.0.1', port=9): Failed to establish a new connection: [WinError 10061] No connection could be made because the target machine actively refused it\")))"
         );
     }
 
