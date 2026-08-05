@@ -101,31 +101,89 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
+/// Em que coluna cada painel mora e com que peso.
+///
+/// Os pesos são as proporções de sempre (60/40 à esquerda, 40/30/30 à direita).
+/// Com painel desligado eles são normalizados sobre os que sobraram — é isso, e
+/// só isso, que faz o layout se redistribuir sozinho.
+const LAYOUT: [(Panel, bool, u16); 5] = [
+    (Panel::Email, true, 60),
+    (Panel::Jira, true, 40),
+    (Panel::Agenda, false, 40),
+    (Panel::Pulls, false, 30),
+    (Panel::Tasks, false, 30),
+];
+
+/// Painéis de uma coluna, cada um com o seu peso na altura.
+pub type Column = Vec<(Panel, u16)>;
+
+/// Divide os painéis ligados nas duas colunas, cada um com seu peso.
+/// Função pura: é o que dá para testar sem desenhar.
+pub fn columns(on: &[Panel]) -> (Column, Column) {
+    let mut left: Column = Vec::new();
+    let mut right: Column = Vec::new();
+    for (panel, is_left, weight) in LAYOUT {
+        if !on.contains(&panel) {
+            continue;
+        }
+        if is_left {
+            left.push((panel, weight));
+        } else {
+            right.push((panel, weight));
+        }
+    }
+    (left, right)
+}
+
 fn render_body(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+    let (left, right) = columns(&app.panels);
+    // Coluna vazia não fica com espaço reservado: a outra recebe a tela inteira.
+    let (left_area, right_area) = match (left.is_empty(), right.is_empty()) {
+        (false, false) => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            (cols[0], cols[1])
+        }
+        (true, false) => (Rect::ZERO, area),
+        (false, true) => (area, Rect::ZERO),
+        // Config sem painel nenhum é recusado no arranque; aqui só não desenha.
+        (true, true) => return,
+    };
+
+    for (panel, rect) in stack(&left, left_area)
+        .into_iter()
+        .chain(stack(&right, right_area))
+    {
+        match panel {
+            Panel::Email => render_emails(app, frame, rect),
+            Panel::Jira => render_jira(app, frame, rect),
+            Panel::Agenda => render_agenda(app, frame, rect),
+            Panel::Pulls => render_pulls(app, frame, rect),
+            Panel::Tasks => render_tasks(app, frame, rect),
+        }
+    }
+}
+
+/// Empilha os painéis de uma coluna, dividindo a altura pelos pesos.
+fn stack(panels: &[(Panel, u16)], area: Rect) -> Vec<(Panel, Rect)> {
+    if panels.is_empty() {
+        return Vec::new();
+    }
+    let constraints: Vec<Constraint> = panels
+        .iter()
+        .map(|(_, weight)| Constraint::Fill(*weight))
+        .collect();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
-
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(cols[0]);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(30),
-        ])
-        .split(cols[1]);
-
-    render_emails(app, frame, left[0]);
-    render_jira(app, frame, left[1]);
-    render_agenda(app, frame, right[0]);
-    render_pulls(app, frame, right[1]);
-    render_tasks(app, frame, right[2]);
+    panels
+        .iter()
+        .zip(rows.iter())
+        .map(|((panel, _), rect)| (*panel, *rect))
+        .collect()
 }
 
 fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -1320,6 +1378,62 @@ mod tests {
             priority: Default::default(),
             recur: Default::default(),
         }
+    }
+
+    /// App com um conjunto de painéis ligados, sem depender do config global.
+    fn app_with_panels(on: &[Panel]) -> App {
+        let mut app = test_app();
+        app.panels = on.to_vec();
+        app.focus = on[0];
+        app
+    }
+
+    #[test]
+    fn the_columns_keep_todays_proportions_when_everything_is_on() {
+        let (left, right) = columns(&Panel::ORDER);
+        assert_eq!(left, vec![(Panel::Email, 60), (Panel::Jira, 40)]);
+        assert_eq!(
+            right,
+            vec![(Panel::Agenda, 40), (Panel::Pulls, 30), (Panel::Tasks, 30)]
+        );
+    }
+
+    #[test]
+    fn a_column_left_empty_is_not_reserved() {
+        let (left, right) = columns(&[Panel::Agenda, Panel::Tasks]);
+        assert!(left.is_empty(), "nada na esquerda");
+        assert_eq!(right, vec![(Panel::Agenda, 40), (Panel::Tasks, 30)]);
+    }
+
+    #[test]
+    fn a_panel_that_is_off_is_not_drawn() {
+        let app = app_with_panels(&[Panel::Email, Panel::Agenda]);
+        let out = render_to_string(&app, 120, 40);
+        assert!(out.contains("E-MAILS"));
+        assert!(out.contains("AGENDA"));
+        assert!(!out.contains("JIRA"), "painel desligado não aparece");
+        assert!(!out.contains("TAREFAS"));
+        assert!(!out.contains("ghpending"));
+    }
+
+    #[test]
+    fn the_only_panel_left_takes_the_whole_screen() {
+        // Com uma coluna vazia, a outra não fica com metade da tela sobrando.
+        let mut app = app_with_panels(&[Panel::Email]);
+        app.emails.items = vec![crate::data::EmailItem {
+            id: "1".into(),
+            account: crate::data::Account::Personal,
+            from: "Alguem".into(),
+            subject: "Assunto comprido que só cabe inteiro numa coluna larga".into(),
+            unread: true,
+            date: "2026-08-05 10:00+00:00".into(),
+        }];
+        app.emails.loaded = true;
+        let out = render_to_string(&app, 120, 40);
+        assert!(
+            out.contains("numa coluna larga"),
+            "o assunto inteiro cabe: a largura toda é do e-mail"
+        );
     }
 
     #[test]

@@ -169,13 +169,26 @@ pub fn spawn(
 /// Menções só entram no refresh se `mentions_loaded` — não vale pagar a
 /// consulta para quem nunca abriu a visão.
 fn refresh_all(ui: &ProgramHandle<Msg>, jira_filter: JiraFilter, mentions_loaded: bool) {
-    let _ = ui.send(Msg::EmailsLoaded(fetch_emails()));
-    let _ = ui.send(Msg::AgendaLoaded(fetch_agenda()));
-    let _ = ui.send(Msg::PullsLoaded(pulls::fetch()));
-    let _ = ui.send(Msg::JiraLoaded(jira::fetch(jira_filter)));
-    let _ = ui.send(Msg::TasksLoaded(tasks::fetch()));
-    if mentions_loaded {
-        let _ = ui.send(Msg::JiraMentions(jira::fetch_mentions()));
+    // Painel desligado não é buscado: é o que transforma "não uso tarefas" em
+    // "não preciso autenticar a Microsoft".
+    let on = crate::config::get().panels;
+    if on.email {
+        let _ = ui.send(Msg::EmailsLoaded(fetch_emails()));
+    }
+    if on.agenda {
+        let _ = ui.send(Msg::AgendaLoaded(fetch_agenda()));
+    }
+    if on.pulls {
+        let _ = ui.send(Msg::PullsLoaded(pulls::fetch()));
+    }
+    if on.jira {
+        let _ = ui.send(Msg::JiraLoaded(jira::fetch(jira_filter)));
+        if mentions_loaded {
+            let _ = ui.send(Msg::JiraMentions(jira::fetch_mentions()));
+        }
+    }
+    if on.tasks {
+        let _ = ui.send(Msg::TasksLoaded(tasks::fetch()));
     }
 }
 
@@ -191,6 +204,9 @@ fn mutate_tasks(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
 /// Vem depois dos painéis no arranque: nada na tela depende disso, então não
 /// deve atrasar o que o usuário está olhando.
 fn refresh_folders(ui: &ProgramHandle<Msg>, at: &mut Option<Instant>) {
+    if !crate::config::get().panels.email {
+        return;
+    }
     let stale = at.map(|t| t.elapsed() >= FOLDERS_TTL).unwrap_or(true);
     if !stale {
         return;

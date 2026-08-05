@@ -30,27 +30,49 @@ pub enum Panel {
 }
 
 impl Panel {
-    /// Próximo painel no ciclo (Tab). Segue a leitura do layout: coluna esquerda
-    /// (E-mail → Jira), depois direita (Agenda → PRs → Tarefas).
-    pub const fn next(self) -> Self {
-        match self {
-            Panel::Email => Panel::Jira,
-            Panel::Jira => Panel::Agenda,
-            Panel::Agenda => Panel::Pulls,
-            Panel::Pulls => Panel::Tasks,
-            Panel::Tasks => Panel::Email,
-        }
+    /// Ordem de leitura do layout: coluna esquerda (E-mail → Jira) e depois a
+    /// direita (Agenda → PRs → Tarefas).
+    pub const ORDER: [Panel; 5] = [
+        Panel::Email,
+        Panel::Jira,
+        Panel::Agenda,
+        Panel::Pulls,
+        Panel::Tasks,
+    ];
+
+    /// Painéis ligados no config, na ordem de leitura.
+    pub fn enabled() -> Vec<Panel> {
+        let on = crate::config::get().panels;
+        Panel::ORDER
+            .into_iter()
+            .filter(|p| match p {
+                Panel::Email => on.email,
+                Panel::Jira => on.jira,
+                Panel::Agenda => on.agenda,
+                Panel::Pulls => on.pulls,
+                Panel::Tasks => on.tasks,
+            })
+            .collect()
     }
 
-    /// Painel anterior no ciclo (Shift+Tab).
-    pub const fn prev(self) -> Self {
-        match self {
-            Panel::Email => Panel::Tasks,
-            Panel::Jira => Panel::Email,
-            Panel::Agenda => Panel::Jira,
-            Panel::Pulls => Panel::Agenda,
-            Panel::Tasks => Panel::Pulls,
+    /// Próximo painel da lista, circulando (Tab).
+    pub fn next_in(on: &[Panel], from: Panel) -> Panel {
+        Self::step_in(on, from, 1)
+    }
+
+    /// Painel anterior da lista, circulando (Shift+Tab).
+    pub fn prev_in(on: &[Panel], from: Panel) -> Panel {
+        Self::step_in(on, from, -1)
+    }
+
+    /// Anda `delta` posições entre os painéis ligados. Painel desligado não é
+    /// destino: quem circula anda sobre a lista, não sobre o enum.
+    fn step_in(on: &[Panel], from: Panel, delta: isize) -> Panel {
+        if on.is_empty() {
+            return from;
         }
+        let at = on.iter().position(|p| *p == from).unwrap_or(0) as isize;
+        on[(at + delta).rem_euclid(on.len() as isize) as usize]
     }
 }
 
@@ -363,6 +385,9 @@ pub struct App {
     pub should_quit: bool,
     pub now: DateTime<Local>,
     pub focus: Panel,
+    /// Painéis ligados, na ordem de leitura. Vem do config; os testes de
+    /// renderização sobrescrevem para exercitar subconjuntos.
+    pub panels: Vec<Panel>,
     pub emails: PanelData<EmailItem>,
     pub jira: PanelData<JiraItem>,
     /// Modo de filtro do painel de Jira, circulado pela tecla `f`.
@@ -409,11 +434,15 @@ pub struct App {
 impl App {
     /// Cria o app. `cmd_tx` envia comandos para a thread do worker.
     pub fn new(theme: BubbleTheme, cmd_tx: Sender<WorkerCmd>) -> Self {
+        let panels = Panel::enabled();
         Self {
             theme,
             should_quit: false,
             now: Local::now(),
-            focus: Panel::Email,
+            // O foco começa no primeiro painel ligado — `Email` só é o padrão
+            // quando ele existe.
+            focus: *panels.first().unwrap_or(&Panel::Email),
+            panels,
             emails: PanelData::new(),
             jira: PanelData::new(),
             jira_filter: JiraFilter::default(),
@@ -664,6 +693,14 @@ impl App {
     /// hoje só o Jira — para não pagar a consulta de quem nunca abre o overlay.
     fn open_notifications(&mut self) {
         self.notifications = Some(NotificationsView { cursor: 0 });
+        // Com o Jira desligado a central não tem fonte alguma hoje: pedir menção
+        // seria cobrar credencial de um painel que a pessoa não usa. Marcar como
+        // carregado é o que faz o overlay dizer "nada pedindo sua atenção" em vez
+        // de ficar preso em "buscando…".
+        if !self.panels.contains(&Panel::Jira) {
+            self.jira_mentions.loaded = true;
+            return;
+        }
         if !self.jira_mentions.loaded {
             let _ = self.cmd_tx.send(WorkerCmd::FetchJiraMentions);
         }
@@ -1161,8 +1198,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('c') if ctrl => self.should_quit = true,
-            KeyCode::Tab => self.focus = self.focus.next(),
-            KeyCode::BackTab => self.focus = self.focus.prev(),
+            KeyCode::Tab => self.focus = Panel::next_in(&self.panels, self.focus),
+            KeyCode::BackTab => self.focus = Panel::prev_in(&self.panels, self.focus),
             // `Shift`+setas marca em faixa no painel de e-mails. Não existe
             // `Shift+j`: o terminal entrega isso como `J`, sem modificador —
             // com as setas o modificador chega de verdade.
@@ -2056,6 +2093,49 @@ mod tests {
         assert_eq!(app.jira_filter, JiraFilter::Both);
         app.update(key(KeyCode::Char('f')));
         assert_eq!(app.jira_filter, JiraFilter::Assignee, "o ciclo volta ao início");
+    }
+
+    #[test]
+    fn the_focus_cycle_skips_panels_that_are_off() {
+        // O config do processo é um `OnceLock`, então o ciclo é testado pela
+        // função pura que ele alimenta.
+        let on = vec![Panel::Email, Panel::Agenda];
+        assert_eq!(Panel::next_in(&on, Panel::Email), Panel::Agenda);
+        assert_eq!(Panel::next_in(&on, Panel::Agenda), Panel::Email, "o ciclo fecha");
+        assert_eq!(Panel::prev_in(&on, Panel::Email), Panel::Agenda);
+    }
+
+    #[test]
+    fn a_single_panel_cycle_stays_put() {
+        let on = vec![Panel::Tasks];
+        assert_eq!(Panel::next_in(&on, Panel::Tasks), Panel::Tasks);
+        assert_eq!(Panel::prev_in(&on, Panel::Tasks), Panel::Tasks);
+    }
+
+    #[test]
+    fn tab_walks_only_the_enabled_panels() {
+        let mut app = test_app();
+        app.panels = vec![Panel::Email, Panel::Tasks];
+        app.focus = Panel::Email;
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus, Panel::Tasks, "pula Jira, Agenda e PRs");
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus, Panel::Email);
+    }
+
+    #[test]
+    fn the_notification_center_says_it_is_empty_when_jira_is_off() {
+        // Sem fonte, pedir menção cobraria credencial de um painel que a pessoa
+        // desligou — e o overlay ficaria preso em "buscando…".
+        let (mut app, rx) = task_app(vec![]);
+        app.panels = vec![Panel::Tasks];
+        app.update(key(KeyCode::Char('n')));
+        assert!(app.notifications.is_some());
+        assert!(app.jira_mentions.loaded, "a central sabe que não vem nada");
+        assert!(
+            !matches!(rx.try_recv(), Ok(WorkerCmd::FetchJiraMentions)),
+            "e nada é pedido ao worker"
+        );
     }
 
     #[test]
