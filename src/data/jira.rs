@@ -30,8 +30,9 @@ pub struct JiraItem {
 ///
 /// O nome vem no idioma da instância — a do autor responde `História` e
 /// `Iniciativa`, não `Story`/`Initiative` —, então os dois idiomas entram no
-/// mapa. Tipo fora do mapa vira `[?]`: inventar uma letra pela inicial faria
-/// `[System] Service request` virar `[S]`, indistinguível de história.
+/// mapa. Tipo fora do mapa vira `[?]`, e não uma letra tirada da inicial:
+/// `[System] Service request` começa com `[`, e chutar `S` por causa de
+/// "Service" o deixaria idêntico a história.
 pub fn type_marker(kind: &str) -> &'static str {
     let k = kind.trim().to_lowercase();
     match k.as_str() {
@@ -39,6 +40,16 @@ pub fn type_marker(kind: &str) -> &'static str {
         "epic" | "épico" | "epico" => "[E]",
         "iniciativa" | "initiative" => "[I]",
         "objetivo" | "objective" => "[O]",
+        // Requisição: no Jira do autor é o tipo do projeto de Pedido de Serviço
+        // (PdS), que a API devolve com o nome do template do Service Management.
+        "[system] service request"
+        | "service request"
+        | "solicitação de serviço"
+        | "solicitacao de servico"
+        | "pedido de serviço"
+        | "pedido de servico"
+        | "requisição"
+        | "requisicao" => "[R]",
         _ => "[?]",
     }
 }
@@ -312,10 +323,20 @@ mod tests {
     }
 
     #[test]
+    fn a_service_request_is_marked_as_a_request() {
+        // O Jira do autor devolve o nome do template do Service Management para
+        // as issues do projeto de Pedido de Serviço (PdS).
+        assert_eq!(type_marker("[System] Service request"), "[R]");
+        assert_eq!(type_marker("Service request"), "[R]");
+        assert_eq!(type_marker("Solicitação de serviço"), "[R]");
+        assert_eq!(type_marker("Requisição"), "[R]");
+    }
+
+    #[test]
     fn a_type_without_a_letter_says_so_instead_of_guessing() {
-        // Pela inicial, `[System] Service request` viraria `[S]` — o mesmo
-        // marcador de história.
-        assert_eq!(type_marker("[System] Service request"), "[?]");
+        // Chutar pela inicial daria `[B]` para bug e `[T]` para tarefa, mas
+        // também `[S]` para subtarefa — igual a história. Melhor admitir.
+        assert_eq!(type_marker("Subtarefa"), "[?]");
         assert_eq!(type_marker(""), "[?]");
     }
 
