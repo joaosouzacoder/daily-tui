@@ -445,8 +445,10 @@ subtarefas.
 
 `A` cria a subtarefa na tarefa da linha onde você está — inclusive quando o
 cursor já está sobre uma subtarefa, aí a nova entra como irmã dela. A mãe abre
-sozinha, senão a subtarefa nova chegaria escondida numa tarefa recolhida. `e` e
-`d` valem só na linha da tarefa: subtarefa não tem edição nem exclusão própria.
+sozinha, senão a subtarefa nova chegaria escondida numa tarefa recolhida.
+
+`e` e `d` seguem a linha: sobre uma tarefa agem na tarefa, sobre uma subtarefa
+agem na subtarefa (renomear e apagar a etapa, sem tocar na mãe).
 
 Subtarefa no Microsoft To Do é o que o app chama de **etapa** (`checklistItem` no
 Graph) — quem procurar "subtarefa" na interface da Microsoft não acha. Uma tarefa

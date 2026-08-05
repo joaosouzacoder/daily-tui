@@ -457,6 +457,7 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 InputKind::AddTask => " Nova tarefa ".to_string(),
                 InputKind::EditTask { .. } => " Editar tarefa ".to_string(),
                 InputKind::AddSubtask { .. } => " Nova subtarefa ".to_string(),
+                InputKind::EditSubtask { .. } => " Editar subtarefa ".to_string(),
             };
             let input = Line::from(vec![theme.span(buffer.clone()), theme.accent("█")]);
             let help = Line::from(theme.muted("Enter: salvar · Esc: cancelar"));
@@ -467,6 +468,18 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
             vec![
                 Line::from(vec![
                     theme.muted("Apagar \""),
+                    theme.span(clip(title, 40)),
+                    theme.muted("\"?"),
+                ]),
+                Line::from(""),
+                Line::from(theme.muted("y: confirmar · n/Esc: cancelar")),
+            ],
+        ),
+        Prompt::ConfirmSubtaskDelete { title, .. } => (
+            " Apagar subtarefa ".to_string(),
+            vec![
+                Line::from(vec![
+                    theme.muted("Apagar a etapa \""),
                     theme.span(clip(title, 40)),
                     theme.muted("\"?"),
                 ]),

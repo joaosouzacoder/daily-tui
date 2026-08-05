@@ -90,6 +90,16 @@ pub fn add_subtask(task_id: &str, title: &str) -> Result<(), String> {
     run(&["subtask", task_id, title]).map(|_| ())
 }
 
+/// Renomeia uma subtarefa.
+pub fn edit_subtask(task_id: &str, item_id: &str, title: &str) -> Result<(), String> {
+    run(&["subtask-edit", task_id, item_id, title]).map(|_| ())
+}
+
+/// Apaga uma subtarefa.
+pub fn delete_subtask(task_id: &str, item_id: &str) -> Result<(), String> {
+    run(&["subtask-delete", task_id, item_id]).map(|_| ())
+}
+
 /// Marca uma subtarefa como concluída.
 pub fn check(task_id: &str, item_id: &str) -> Result<(), String> {
     run(&["check", task_id, item_id]).map(|_| ())

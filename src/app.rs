@@ -11,6 +11,7 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
 use crate::data::jira::{JiraFilter, JiraItem, JiraView};
+use crate::data::tasks::SubTask;
 use crate::data::{notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
@@ -147,6 +148,8 @@ pub enum InputKind {
     EditTask { id: String },
     /// Criar uma subtarefa na tarefa com este id.
     AddSubtask { task_id: String },
+    /// Renomear a subtarefa `item_id` da tarefa `task_id`.
+    EditSubtask { task_id: String, item_id: String },
 }
 
 /// Overlay modal de interação com tarefas (entrada de texto ou confirmação).
@@ -155,6 +158,12 @@ pub enum Prompt {
     Input { kind: InputKind, buffer: String },
     /// Confirmação de exclusão da tarefa selecionada.
     ConfirmDelete { id: String, title: String },
+    /// Confirmação de exclusão da subtarefa selecionada.
+    ConfirmSubtaskDelete {
+        task_id: String,
+        item_id: String,
+        title: String,
+    },
     /// Escolha de pasta para mover os e-mails alvo (marcados, ou o do cursor).
     ///
     /// A lista traz as pastas de **todas** as contas presentes nos alvos, cada
@@ -704,6 +713,18 @@ impl App {
         }
     }
 
+    /// Subtarefa sob o cursor, com a tarefa a que pertence. `None` quando a
+    /// linha é de uma tarefa.
+    fn cursor_subtask(&self) -> Option<(&TaskItem, &SubTask)> {
+        match self.selected_row()? {
+            tasks::TaskRow::Task(_) => None,
+            tasks::TaskRow::Sub { task, sub } => {
+                let item = self.tasks.items.get(task)?;
+                Some((item, item.subtasks.get(sub)?))
+            }
+        }
+    }
+
     /// Tarefa sob o cursor, e só quando a linha é a dela — `None` numa linha de
     /// subtarefa. Editar e apagar valem para a tarefa; a subtarefa não tem essas
     /// ações, e agir na mãe sem o usuário pedir apagaria a tarefa inteira.
@@ -806,8 +827,18 @@ impl App {
         }
     }
 
-    /// Abre o prompt de edição com o título atual da tarefa selecionada.
+    /// Abre o prompt de edição da linha sob o cursor — tarefa ou subtarefa.
     fn open_edit_task(&mut self) {
+        if let Some((task, sub)) = self.cursor_subtask() {
+            self.prompt = Some(Prompt::Input {
+                kind: InputKind::EditSubtask {
+                    task_id: task.id.clone(),
+                    item_id: sub.id.clone(),
+                },
+                buffer: sub.title.clone(),
+            });
+            return;
+        }
         if let Some(t) = self.selected_task() {
             self.prompt = Some(Prompt::Input {
                 kind: InputKind::EditTask { id: t.id.clone() },
@@ -816,8 +847,16 @@ impl App {
         }
     }
 
-    /// Abre a confirmação de exclusão da tarefa selecionada.
+    /// Abre a confirmação de exclusão da linha sob o cursor — tarefa ou etapa.
     fn open_delete_task(&mut self) {
+        if let Some((task, sub)) = self.cursor_subtask() {
+            self.prompt = Some(Prompt::ConfirmSubtaskDelete {
+                task_id: task.id.clone(),
+                item_id: sub.id.clone(),
+                title: sub.title.clone(),
+            });
+            return;
+        }
         if let Some(t) = self.selected_task() {
             self.prompt = Some(Prompt::ConfirmDelete {
                 id: t.id.clone(),
@@ -838,7 +877,9 @@ impl App {
                 KeyCode::Enter => self.submit_prompt(),
                 _ => {}
             },
-            Some(Prompt::ConfirmDelete { .. }) | Some(Prompt::ConfirmEmailDelete { .. }) => {
+            Some(Prompt::ConfirmDelete { .. })
+            | Some(Prompt::ConfirmSubtaskDelete { .. })
+            | Some(Prompt::ConfirmEmailDelete { .. }) => {
                 match key.code {
                     KeyCode::Char('y') | KeyCode::Enter => self.submit_prompt(),
                     KeyCode::Char('n') | KeyCode::Esc => self.prompt = None,
@@ -873,6 +914,13 @@ impl App {
                 match kind {
                     InputKind::AddTask => WorkerCmd::TaskAdd(title),
                     InputKind::EditTask { id } => WorkerCmd::TaskEdit { id, title },
+                    InputKind::EditSubtask { task_id, item_id } => {
+                        WorkerCmd::SubTaskEdit {
+                            task_id,
+                            item_id,
+                            title,
+                        }
+                    }
                     InputKind::AddSubtask { task_id } => {
                         // Expande a mãe: a subtarefa nova chega com a re-busca e
                         // ficaria escondida numa tarefa recolhida.
@@ -882,6 +930,9 @@ impl App {
                 }
             }
             Some(Prompt::ConfirmDelete { id, .. }) => WorkerCmd::TaskDelete(id),
+            Some(Prompt::ConfirmSubtaskDelete {
+                task_id, item_id, ..
+            }) => WorkerCmd::SubTaskDelete { task_id, item_id },
             Some(Prompt::PickFolder {
                 items,
                 folders,
@@ -1247,18 +1298,50 @@ mod tests {
     }
 
     #[test]
-    fn edit_and_delete_do_not_fire_from_a_subtask_row() {
+    fn edit_and_delete_act_on_the_subtask_when_the_row_is_one() {
         // O cursor anda por linhas: com t1 expandida, indexar as tarefas pelo
         // cursor apontava para OUTRA tarefa — `d` apagava a errada.
         let (mut app, rx) = task_app(vec![task_with_subs("t1"), task("t2", "vizinha", false)]);
         app.update(key(KeyCode::Enter)); // expande t1
-        app.update(key(KeyCode::Char('j'))); // primeira subtarefa
+        app.update(key(KeyCode::Char('j'))); // primeira subtarefa de t1
 
         app.update(key(KeyCode::Char('e')));
-        assert!(app.prompt.is_none(), "subtarefa não tem edição de título");
+        match &app.prompt {
+            Some(Prompt::Input {
+                kind: InputKind::EditSubtask { task_id, item_id },
+                buffer,
+            }) => {
+                assert_eq!((task_id.as_str(), item_id.as_str()), ("t1", "t1-s1"));
+                assert_eq!(buffer, "primeira", "vem preenchido com o título da etapa");
+            }
+            _ => panic!("esperava prompt de edição de subtarefa"),
+        }
+        app.update(key(KeyCode::Char('!')));
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::SubTaskEdit {
+                task_id,
+                item_id,
+                title,
+            } => {
+                assert_eq!((task_id.as_str(), item_id.as_str()), ("t1", "t1-s1"));
+                assert_eq!(title, "primeira!");
+            }
+            _ => panic!("esperava SubTaskEdit"),
+        }
+
         app.update(key(KeyCode::Char('d')));
-        assert!(app.prompt.is_none(), "e muito menos exclusão da tarefa mãe");
-        assert!(rx.try_recv().is_err(), "nenhum comando sai daí");
+        assert!(
+            matches!(&app.prompt, Some(Prompt::ConfirmSubtaskDelete { title, .. }) if title == "primeira"),
+            "apagar etapa também confirma antes"
+        );
+        app.update(key(KeyCode::Char('y')));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::SubTaskDelete { task_id, item_id } => {
+                assert_eq!((task_id.as_str(), item_id.as_str()), ("t1", "t1-s1"));
+            }
+            _ => panic!("esperava SubTaskDelete"),
+        }
     }
 
     #[test]

@@ -241,6 +241,16 @@ def do_subtask(task_id, title):
     in_list("POST", f"/{task_id}/checklistItems", json={"displayName": title})
 
 
+def do_subtask_edit(task_id, item_id, title):
+    """Renomeia uma subtarefa (checklistItem) da tarefa dada."""
+    in_list("PATCH", f"/{task_id}/checklistItems/{item_id}", json={"displayName": title})
+
+
+def do_subtask_delete(task_id, item_id):
+    """Apaga uma subtarefa (checklistItem) da tarefa dada."""
+    in_list("DELETE", f"/{task_id}/checklistItems/{item_id}")
+
+
 def do_check(task_id, item_id, checked):
     """Marca ou desmarca uma subtarefa (checklistItem) da tarefa dada."""
     in_list("PATCH", f"/{task_id}/checklistItems/{item_id}", json={"isChecked": checked})
@@ -255,7 +265,7 @@ def main():
     if not args:
         die(
             "uso: mstodo {auth|list|add|complete|reopen|edit|delete"
-            "|subtask|check|uncheck}"
+            "|subtask|subtask-edit|subtask-delete|check|uncheck}"
         )
     cmd, rest = args[0], args[1:]
     if cmd == "auth":
@@ -274,6 +284,10 @@ def main():
         do_delete(rest[0])
     elif cmd == "subtask":
         do_subtask(rest[0], rest[1])
+    elif cmd == "subtask-edit":
+        do_subtask_edit(rest[0], rest[1], rest[2])
+    elif cmd == "subtask-delete":
+        do_subtask_delete(rest[0], rest[1])
     elif cmd == "check":
         do_check(rest[0], rest[1], True)
     elif cmd == "uncheck":
