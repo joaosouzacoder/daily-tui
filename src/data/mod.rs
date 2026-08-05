@@ -19,14 +19,40 @@ pub use tasks::TaskItem;
 /// passam por aqui. No Unix é sempre exec direto.
 pub fn helper_command(program: &str) -> std::process::Command {
     #[cfg(windows)]
-    {
+    let mut cmd = {
         let mut cmd = std::process::Command::new("cmd");
         cmd.arg("/C").arg(program);
         cmd
-    }
+    };
     #[cfg(not(windows))]
-    {
-        std::process::Command::new(program)
+    let mut cmd = std::process::Command::new(program);
+    helper_env(&mut cmd, program);
+    cmd
+}
+
+/// Passa ao helper o que o config souber sobre ele.
+///
+/// Campo vazio não é injetado: o helper cai na variável do ambiente, que é como
+/// o launcher do Windows e o `.bashrc` de quem já usava o painel entregam esses
+/// valores. Token nenhum passa por aqui — `JIRA_TOKEN` e `GITHUB_TOKEN` vêm só
+/// do ambiente, e o config de exemplo diz isso.
+fn helper_env(cmd: &mut std::process::Command, program: &str) {
+    let cfg = crate::config::get();
+    let pairs: [(&str, &str); 2] = match program {
+        "jira" => [
+            ("JIRA_CLOUD", cfg.jira.cloud.as_str()),
+            ("JIRA_EMAIL", cfg.jira.email.as_str()),
+        ],
+        "mstodo" => [
+            ("DAILY_TUI_TODO_CLIENT_ID", cfg.tasks.client_id.as_str()),
+            ("DAILY_TUI_TODO_LIST", cfg.tasks.list.as_str()),
+        ],
+        _ => return,
+    };
+    for (key, value) in pairs {
+        if !value.is_empty() {
+            cmd.env(key, value);
+        }
     }
 }
 
@@ -306,6 +332,40 @@ mod tests {
             vec![Account::Work, Account::Personal],
             "sem config, as duas contas de sempre"
         );
+    }
+
+    #[test]
+    fn the_task_helper_gets_the_client_id_from_the_config() {
+        // O default do config já tem o client público, então ele é injetado
+        // mesmo sem o usuário exportar variável nenhuma.
+        let cmd = helper_command("mstodo");
+        let value = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("DAILY_TUI_TODO_CLIENT_ID"))
+            .and_then(|(_, v)| v);
+        assert!(value.is_some(), "o client id vai para o helper");
+    }
+
+    #[test]
+    fn an_empty_config_field_leaves_the_environment_in_charge() {
+        // `jira.cloud` vazio (o default) não pode virar `JIRA_CLOUD=""` e
+        // atropelar quem exporta a variável no shell ou no launcher.
+        let cmd = helper_command("jira");
+        assert!(
+            !cmd.get_envs()
+                .any(|(k, _)| k == std::ffi::OsStr::new("JIRA_CLOUD")),
+            "sem valor no config, nada é injetado"
+        );
+    }
+
+    #[test]
+    fn a_helper_without_settings_gets_none_injected() {
+        let cmd = helper_command("gcalcli");
+        let injected: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k != std::ffi::OsStr::new("PYTHONIOENCODING"))
+            .collect();
+        assert!(injected.is_empty());
     }
 
     #[test]
