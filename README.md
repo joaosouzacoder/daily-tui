@@ -527,12 +527,25 @@ como lido só por ter sido aberto: marcar é decisão sua, com `Espaço`.
 
 `Ctrl+Enter` abre a mensagem **no Gmail**, no navegador. O Gmail não conhece o id
 do himalaya (que é a UID do IMAP), então o link busca pelo header `Message-ID` da
-mensagem, com o operador `rfc822msgid`. A conta vai no caminho
-(`/mail/u/<e-mail>/`) e não em `?authuser=`: aquela forma não é canônica, o Gmail
-redireciona para resolver o índice da conta e o `#search/…` se perde no caminho —
-a aba abre na home da caixa. O endereço vem do config (`accounts.email`) ou das
-variáveis `DAILY_TUI_*_EMAIL`; sem nenhum dos dois, o link usa o índice `0`, que é
-a única conta quando cada uma vive num profile do navegador. Buscar o header é uma ida ao
+mensagem, com o operador `rfc822msgid`:
+
+```
+https://mail.google.com/mail/u/0/#search/rfc822msgid%3A<message-id>
+```
+
+A conta **não** entra na URL — as duas formas de colocá-la lá foram testadas e
+falharam: `?authuser=<e-mail>` faz o Gmail redirecionar para resolver o índice da
+conta e o `#search/…` se perde no caminho (a aba abre na home da caixa), e
+`/mail/u/<e-mail>/` é recusado com "Temporary Error (404)", porque aquele
+segmento aceita só índice numérico. Sobra o `0`, que é canônico e preserva o
+fragmento.
+
+Consequência prática: o link abre **no navegador que já está aberto**, na conta
+daquele profile. Se você mantém uma conta por profile, abra o e-mail estando no
+profile daquela conta — senão a busca não acha a mensagem. E como `rfc822msgid` é
+um operador de *busca*, o Gmail mostra a conversa sozinha na lista, a um clique do
+corpo: abrir a mensagem escancarada exigiria o id interno de thread do Gmail, que
+o IMAP não expõe. Buscar o header é uma ida ao
 IMAP, então quem faz isso é o worker: a tela não congela, e o e-mail **não** é
 marcado como lido no caminho.
 

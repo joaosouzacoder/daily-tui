@@ -241,20 +241,20 @@ pub fn parse_message_id(raw: &str) -> Result<String, String> {
 /// O Gmail não expõe o id do himalaya (que é a UID do IMAP), mas acha a mensagem
 /// pelo header com o operador de busca `rfc822msgid`.
 ///
-/// A conta vai **no caminho** (`/mail/u/<e-mail>/`), não em `?authuser=`: o
-/// `/mail/u/?authuser=…` não é a URL canônica, e o Gmail redireciona para
-/// resolver o índice da conta — no redirect o `#search/…` se perde e a aba abre
-/// na home da caixa (medido em 2026-08-05). O caminho com a conta já é canônico,
-/// então o fragmento chega inteiro. Sem endereço conhecido, sobra o índice 0,
-/// que é a única conta quando cada uma vive num profile do navegador.
-pub fn gmail_url(address: &str, message_id: &str) -> String {
+/// A conta **não** entra na URL, e as duas formas de colocá-la foram medidas
+/// (2026-08-05, no navegador do autor):
+///
+/// - `?authuser=<e-mail>` faz o Gmail redirecionar para resolver o índice da
+///   conta, e o `#search/…` se perde no redirect: a aba abre na home da caixa;
+/// - `/mail/u/<e-mail>/` é recusado — o segmento aceita só índice numérico, e a
+///   resposta é a página "Temporary Error (404) — your account is temporarily
+///   unavailable".
+///
+/// Fica o índice `0`, que é canônico e preserva o fragmento. Quem lê a URL é o
+/// navegador que já está aberto, então o e-mail abre na conta daquele profile.
+pub fn gmail_url(message_id: &str) -> String {
     let msgid = percent_encode(message_id);
-    let account = if address.is_empty() {
-        "0".to_string()
-    } else {
-        percent_encode(address)
-    };
-    format!("https://mail.google.com/mail/u/{account}/#search/rfc822msgid%3A{msgid}")
+    format!("https://mail.google.com/mail/u/0/#search/rfc822msgid%3A{msgid}")
 }
 
 /// Escapa o que não é seguro numa URL. `Message-ID` costuma ter `@`, `+`, `/` e
@@ -276,8 +276,7 @@ fn percent_encode(raw: &str) -> String {
 /// IMAP, e a tela não pode congelar por causa dela.
 pub fn open_in_gmail(account: Account, id: &str) -> Result<(), String> {
     let msgid = message_id(account, id)?;
-    let address = account.address().unwrap_or_default();
-    super::open_url(&gmail_url(&address, &msgid))
+    super::open_url(&gmail_url(&msgid))
 }
 
 /// Busca o corpo de um e-mail, já legível.
@@ -468,10 +467,10 @@ só corpo aqui
     }
 
     #[test]
-    fn the_gmail_link_searches_by_message_id_in_the_right_account() {
-        let url = gmail_url("voce@exemplo.com", "abc+def/ghi=@mail.example.com");
+    fn the_gmail_link_searches_by_message_id() {
+        let url = gmail_url("abc+def/ghi=@mail.example.com");
         assert!(
-            url.starts_with("https://mail.google.com/mail/u/voce%40exemplo.com/#search/"),
+            url.starts_with("https://mail.google.com/mail/u/0/#search/rfc822msgid%3A"),
             "{url}"
         );
         // `+`, `/`, `=` e `@` escapados: sem isso o Gmail lê parte do id como
@@ -480,18 +479,14 @@ só corpo aqui
     }
 
     #[test]
-    fn the_account_goes_in_the_path_and_never_in_authuser() {
-        // `/mail/u/?authuser=…` redireciona para resolver o índice da conta, e o
-        // `#search/…` se perde no redirect: a aba abria na home da caixa.
-        let url = gmail_url("voce@exemplo.com", "x@y");
+    fn the_account_never_goes_into_the_url() {
+        // As duas formas de pôr a conta ali foram medidas e falharam:
+        // `?authuser=` perde o fragmento no redirect, e o e-mail no lugar do
+        // índice devolve "Temporary Error (404)".
+        let url = gmail_url("x@y");
         assert!(!url.contains("authuser"), "{url}");
-        assert!(url.contains("/#search/rfc822msgid%3A"), "{url}");
-    }
-
-    #[test]
-    fn without_a_configured_address_the_link_falls_back_to_the_first_account() {
-        let url = gmail_url("", "x@y");
-        assert!(url.starts_with("https://mail.google.com/mail/u/0/#search/"), "{url}");
+        assert!(!url.contains("@y/"), "endereço nenhum no caminho: {url}");
+        assert!(url.contains("/mail/u/0/#search/"), "{url}");
     }
 
     // Amostra real de `himalaya envelope list -a work -o json` (stdout).
