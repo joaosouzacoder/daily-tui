@@ -130,6 +130,69 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+/// Programa que abre URL em cada sistema.
+///
+/// Compilado em toda plataforma (é `cfg!`, não `#[cfg]`), então o build no
+/// Windows também checa a escolha do Unix. O `xdg-open` é do freedesktop e
+/// **não existe no macOS**, onde o equivalente é o `open`.
+fn browser_program() -> &'static str {
+    if cfg!(windows) {
+        "cmd"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    }
+}
+
+/// Abre uma URL no navegador do sistema.
+///
+/// No Windows via `cmd /C start ""` — o primeiro argumento vazio é o título da
+/// janela, sem ele o `start` interpreta a URL como título. Fora dele, o
+/// programa vem de `browser_program` e recebe a URL como argumento.
+pub fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new(browser_program());
+        // `Command::args` só citaria a URL se ela tivesse espaço ou aspas —
+        // mas quem lê essa linha é o `cmd.exe`, que a retokeniza com sua
+        // própria gramática, onde `&`, `|` e `^` são separadores/escapes, não
+        // texto literal (foi por causa dessa classe de bug, truncando uma URL
+        // no primeiro `&`, que o fluxo OAuth do himalaya trocou pra device
+        // code). `raw_arg` monta a linha crua sem a citação do Rust interferir,
+        // e `quote_for_cmd` bota a URL entre aspas para o cmd.exe tratá-la
+        // como um único token.
+        c.raw_arg(format!("/C start \"\" {}", quote_for_cmd(url)));
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = std::process::Command::new(browser_program());
+        c.arg(url);
+        c
+    };
+    cmd.status()
+        .map_err(|e| format!("falha ao abrir o navegador: {e}"))
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(format!("navegador saiu com {s}"))
+            }
+        })
+}
+
+/// Envolve `url` em aspas para o `cmd.exe` tratar como um único token.
+///
+/// Aspas embutidas na URL são removidas em vez de escapadas: uma URL válida
+/// nunca deveria conter uma, e o `cmd.exe` não tem uma forma segura de
+/// escapar aspas dentro de uma string que já está entre aspas.
+#[cfg(windows)]
+fn quote_for_cmd(url: &str) -> String {
+    format!("\"{}\"", url.replace('"', ""))
+}
+
 /// Conta de origem de um item (e-mail ou agenda).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Account {
@@ -215,16 +278,30 @@ impl Account {
     /// `DAILY_TUI_PERSONAL_EMAIL`, que é como isso funcionava antes do config
     /// existir. Por último, um placeholder — nunca um e-mail no código.
     pub fn primary_calendar(self) -> String {
+        let default = match self {
+            Account::Work => "you-work@example.com",
+            Account::Personal => "you@example.com",
+        };
+        self.address().unwrap_or_else(|| default.to_string())
+    }
+
+    /// E-mail desta conta, quando se sabe qual é.
+    ///
+    /// Config primeiro; depois as variáveis `DAILY_TUI_*_EMAIL`, que é como isso
+    /// funcionava antes do config e como o launcher do Windows ainda entrega.
+    /// `None` quando ninguém disse — aí quem chama decide o que fazer, em vez de
+    /// receber um placeholder e mandá-lo para o Gmail.
+    pub fn address(self) -> Option<String> {
         if let Some(c) = self.cfg()
             && !c.email.is_empty()
         {
-            return c.email.clone();
+            return Some(c.email.clone());
         }
-        let (var, default) = match self {
-            Account::Work => ("DAILY_TUI_WORK_EMAIL", "you-work@example.com"),
-            Account::Personal => ("DAILY_TUI_PERSONAL_EMAIL", "you@example.com"),
+        let var = match self {
+            Account::Work => "DAILY_TUI_WORK_EMAIL",
+            Account::Personal => "DAILY_TUI_PERSONAL_EMAIL",
         };
-        std::env::var(var).unwrap_or_else(|_| default.to_string())
+        std::env::var(var).ok().filter(|v| !v.is_empty())
     }
 }
 
@@ -367,6 +444,45 @@ mod tests {
             .filter(|(k, _)| *k != std::ffi::OsStr::new("PYTHONIOENCODING"))
             .collect();
         assert!(injected.is_empty());
+    }
+
+    // `quote_for_cmd` só existe no Windows, como o `cmd /C start` que ela serve.
+    #[cfg(windows)]
+    #[test]
+    fn quote_for_cmd_wraps_the_url_so_cmd_treats_it_as_one_token() {
+        assert_eq!(
+            quote_for_cmd("https://x.atlassian.net/browse/A-1"),
+            "\"https://x.atlassian.net/browse/A-1\""
+        );
+    }
+    // `quote_for_cmd` só existe no Windows, como o `cmd /C start` que ela serve.
+    #[cfg(windows)]
+    #[test]
+    fn quote_for_cmd_preserves_ampersand_pipe_and_caret_inside_the_quotes() {
+        // Sem as aspas, o cmd.exe trataria `&`/`|`/`^` como separadores ou
+        // escapes da própria gramática dele, não como parte da URL.
+        let q = quote_for_cmd("https://x/browse/A-1?a=1&b=2|3^4");
+        assert_eq!(q, "\"https://x/browse/A-1?a=1&b=2|3^4\"");
+    }
+    // `quote_for_cmd` só existe no Windows, como o `cmd /C start` que ela serve.
+    #[cfg(windows)]
+    #[test]
+    fn quote_for_cmd_strips_embedded_quotes_instead_of_trying_to_escape_them() {
+        assert_eq!(quote_for_cmd("https://x/\"evil\""), "\"https://x/evil\"");
+    }
+
+    #[test]
+    fn the_browser_program_matches_the_platform() {
+        // `xdg-open` é do freedesktop: no macOS ele não existe, e usá-lo daria
+        // "falha ao abrir o navegador" em toda issue aberta com Enter.
+        let expected = if cfg!(windows) {
+            "cmd"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(browser_program(), expected);
     }
 
     #[test]

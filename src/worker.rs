@@ -51,6 +51,8 @@ pub enum WorkerCmd {
     /// Grava título/vencimento/repetição/prioridade de uma tarefa.
     TaskUpdate { id: String, edit: tasks::TaskEdit },
     TaskDelete(String),
+    /// Abre um e-mail no Gmail (busca o `Message-ID` e chama o navegador).
+    OpenEmailWeb { account: Account, id: String },
     /// Cria uma subtarefa na tarefa dada.
     SubTaskAdd { task_id: String, title: String },
     /// Renomeia uma subtarefa.
@@ -126,6 +128,9 @@ pub fn spawn(
                 Ok(WorkerCmd::EmailDelete { items }) => {
                     let done = each(&items, email::delete);
                     mutate_emails(&ui, EmailWriteKind::Gone, items, done);
+                }
+                Ok(WorkerCmd::OpenEmailWeb { account, id }) => {
+                    let _ = ui.send(Msg::EmailWebOpened(email::open_in_gmail(account, &id)));
                 }
                 Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
                 Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),

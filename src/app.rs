@@ -617,7 +617,7 @@ impl App {
         let Some(url) = self.jira.items.get(self.jira.cursor).map(|i| i.url.clone()) else {
             return;
         };
-        if let Err(e) = crate::data::jira::open_url(&url) {
+        if let Err(e) = crate::data::open_url(&url) {
             self.jira.error = Some(e);
         }
     }
@@ -700,6 +700,20 @@ impl App {
         }
     }
 
+    /// Manda o worker abrir no Gmail o e-mail sob o cursor.
+    ///
+    /// O trabalho é do worker porque descobrir o `Message-ID` é uma ida ao IMAP:
+    /// fazer isso aqui congelaria a tela por um ou dois segundos.
+    fn open_email_on_web(&mut self) {
+        let Some(item) = self.emails.items.get(self.emails.cursor) else {
+            return;
+        };
+        let _ = self.cmd_tx.send(WorkerCmd::OpenEmailWeb {
+            account: item.account,
+            id: item.id.clone(),
+        });
+    }
+
     /// Abre a central de notificações. Busca as fontes que ainda não carregaram —
     /// hoje só o Jira — para não pagar a consulta de quem nunca abre o overlay.
     fn open_notifications(&mut self) {
@@ -746,7 +760,7 @@ impl App {
                     .get(cursor)
                     .map(|n| n.url.clone())
                     .filter(|u| !u.is_empty());
-                if let Some(Err(e)) = url.map(|u| crate::data::jira::open_url(&u)) {
+                if let Some(Err(e)) = url.map(|u| crate::data::open_url(&u)) {
                     self.jira_mentions.error = Some(e);
                 }
             }
@@ -1220,6 +1234,9 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.focused_scroll(-1),
             KeyCode::Char('g') | KeyCode::Home => self.focused_to_first(),
             KeyCode::Char('G') | KeyCode::End => self.focused_to_last(),
+            // `Ctrl+Enter` no e-mail abre a mensagem no Gmail. Vem antes do
+            // `Enter` puro porque o `match` para no primeiro braço que casa.
+            KeyCode::Enter if ctrl && self.focus == Panel::Email => self.open_email_on_web(),
             KeyCode::Enter => match self.focus {
                 Panel::Email => self.open_detail(),
                 Panel::Jira => self.open_selected_issue(),
@@ -1338,6 +1355,12 @@ impl Model for App {
                         }
                     }
                     Err(e) => self.emails.error = Some(e),
+                }
+            }
+            Msg::EmailWebOpened(res) => {
+                // Só o erro interessa: quando dá certo, o navegador é a resposta.
+                if let Err(e) = res {
+                    self.emails.error = Some(e);
                 }
             }
             Msg::EmailBody(account, id, res) => {
@@ -2245,6 +2268,51 @@ mod tests {
         assert_eq!(app.emails.cursor, 2);
         app.emails.set(Ok(vec![email("1")])); // lista encolheu
         assert_eq!(app.emails.cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_enter_asks_the_worker_to_open_the_email_on_the_web() {
+        // No worker e não aqui: descobrir o `Message-ID` é uma ida ao IMAP, e a
+        // tela não pode congelar por causa dela.
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.emails.items = vec![email_item("42", true)];
+        app.emails.loaded = true;
+
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::OpenEmailWeb { account, id } => {
+                assert_eq!(account, Account::Personal);
+                assert_eq!(id, "42");
+            }
+            _ => panic!("esperava OpenEmailWeb"),
+        }
+        assert!(app.detail.is_none(), "e não abre o overlay de leitura");
+    }
+
+    #[test]
+    fn plain_enter_still_opens_the_body() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.emails.items = vec![email_item("42", true)];
+        app.emails.loaded = true;
+
+        app.update(key(KeyCode::Enter));
+        assert!(app.detail.is_some(), "Enter puro segue abrindo o corpo");
+        assert!(
+            !matches!(rx.try_recv(), Ok(WorkerCmd::OpenEmailWeb { .. })),
+            "e não chama o navegador"
+        );
+    }
+
+    #[test]
+    fn a_failure_to_open_the_browser_lands_on_the_panel() {
+        let mut app = test_app();
+        app.update(Msg::EmailWebOpened(Err("xdg-open não encontrado".into())));
+        assert_eq!(app.emails.error.as_deref(), Some("xdg-open não encontrado"));
     }
 
     #[test]

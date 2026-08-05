@@ -495,7 +495,8 @@ resto do painel continua funcionando.
 
 O rodapé mostra as teclas do painel em foco, então não é preciso decorar.
 
-No painel **E-mails**: `Enter` abre o corpo · `Espaço` marca lido/não lido ·
+No painel **E-mails**: `Enter` abre o corpo · `Ctrl+Enter` abre a mensagem no
+Gmail · `Espaço` marca lido/não lido ·
 `m` move para uma pasta · `d` exclui · `Shift`+`↑`/`↓` marca vários · `x` marca ou
 desmarca o de baixo do cursor · `Esc` limpa a marcação toda. **Excluir move para a Lixeira**, não apaga do servidor — é
 recuperável, e pede confirmação (`y`/`n`).
@@ -523,6 +524,15 @@ onde está.
 e-mail, o corpo é buscado e guardado em cache — então `Enter` costuma abrir
 instantâneo. A busca usa `--preview`, que impede o himalaya de marcar o e-mail
 como lido só por ter sido aberto: marcar é decisão sua, com `Espaço`.
+
+`Ctrl+Enter` abre a mensagem **no Gmail**, no navegador. O Gmail não conhece o id
+do himalaya (que é a UID do IMAP), então o link busca pelo header `Message-ID` da
+mensagem, com o operador `rfc822msgid` — e leva o `authuser` da conta, para abrir
+na conta certa de quem tem as duas logadas. O endereço vem do config
+(`accounts.email`) ou das variáveis `DAILY_TUI_*_EMAIL`; sem nenhum dos dois, o
+link cai na primeira conta logada no navegador. Buscar o header é uma ida ao
+IMAP, então quem faz isso é o worker: a tela não congela, e o e-mail **não** é
+marcado como lido no caminho.
 
 E-mail que só tem parte HTML é convertido para texto legível (tags fora, `script`
 e `style` descartados, blocos virando linhas, entidades decodificadas — inclusive

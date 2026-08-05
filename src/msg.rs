@@ -49,6 +49,8 @@ pub enum Msg {
         error: Option<String>,
         list: Result<Vec<EmailItem>, String>,
     },
+    /// Resultado de abrir um e-mail no Gmail. Só interessa quando falha.
+    EmailWebOpened(Result<(), String>),
     /// Corpo de um e-mail. Carrega a chave porque o corpo é buscado em segundo
     /// plano: quando chega, pode não ser mais o e-mail sob o cursor.
     EmailBody(crate::data::Account, String, Result<String, String>),

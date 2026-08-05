@@ -200,6 +200,82 @@ fn run(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// `Message-ID` do e-mail, sem os `<>`.
+///
+/// Usa `--preview` pelo mesmo motivo do corpo: abrir no Gmail não pode marcar o
+/// e-mail como lido de lambuja.
+pub fn message_id(account: Account, id: &str) -> Result<String, String> {
+    let raw = run(&[
+        "message",
+        "read",
+        id,
+        "-a",
+        account.himalaya_name(),
+        "-H",
+        "Message-ID",
+        "--preview",
+    ])?;
+    parse_message_id(&raw)
+}
+
+/// Extrai o `Message-ID` da saída do himalaya.
+///
+/// O header vem no topo e o corpo vem logo depois, então a primeira linha que
+/// casa é a que vale — e o corpo de um e-mail pode citar "Message-ID:" no meio
+/// de uma resposta.
+pub fn parse_message_id(raw: &str) -> Result<String, String> {
+    raw.lines()
+        .find_map(|line| {
+            let rest = line
+                .strip_prefix("Message-ID:")
+                .or_else(|| line.strip_prefix("Message-Id:"))
+                .or_else(|| line.strip_prefix("message-id:"))?;
+            let value = rest.trim().trim_start_matches('<').trim_end_matches('>');
+            (!value.is_empty()).then(|| value.to_string())
+        })
+        .ok_or_else(|| "e-mail sem Message-ID: não dá para achá-lo no Gmail".to_string())
+}
+
+/// Link que abre esta mensagem no Gmail.
+///
+/// O Gmail não expõe o id do himalaya (que é a UID do IMAP), mas acha a mensagem
+/// pelo header com o operador de busca `rfc822msgid`. Com o `authuser` o link
+/// abre na conta certa de quem tem mais de uma logada no navegador.
+pub fn gmail_url(address: &str, message_id: &str) -> String {
+    let msgid = percent_encode(message_id);
+    if address.is_empty() {
+        format!("https://mail.google.com/mail/u/0/#search/rfc822msgid%3A{msgid}")
+    } else {
+        format!(
+            "https://mail.google.com/mail/u/?authuser={}#search/rfc822msgid%3A{msgid}",
+            percent_encode(address)
+        )
+    }
+}
+
+/// Escapa o que não é seguro numa URL. `Message-ID` costuma ter `@`, `+`, `/` e
+/// `=`, e sem escapar o Gmail lê parte deles como outra coisa.
+fn percent_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Abre no Gmail o e-mail dado. Roda no worker: buscar o header é uma ida ao
+/// IMAP, e a tela não pode congelar por causa dela.
+pub fn open_in_gmail(account: Account, id: &str) -> Result<(), String> {
+    let msgid = message_id(account, id)?;
+    let address = account.address().unwrap_or_default();
+    super::open_url(&gmail_url(&address, &msgid))
+}
+
 /// Busca o corpo de um e-mail, já legível.
 ///
 /// Usa `--preview` de propósito: sem ele o himalaya marca o envelope como lido
@@ -356,6 +432,52 @@ fn collapse_blank_lines(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Saída real do `himalaya message read -H Message-ID --preview`: o header no
+    // topo, o corpo logo abaixo (com o texto normalizado).
+    const HEADER_THEN_BODY: &str = concat!(
+        "Message-ID: <ua3mxwoUQ1yWgVpJXSkKYg@geopod-ismtpd-4>
+",
+        "
+",
+        "Bom dia, seguem os dados.
+",
+        "Message-ID: <isto-esta-no-corpo@exemplo.com>
+",
+    );
+
+    #[test]
+    fn the_message_id_comes_from_the_header_not_from_the_body() {
+        // Um e-mail de resposta cita headers no corpo; vale a primeira linha.
+        assert_eq!(
+            parse_message_id(HEADER_THEN_BODY).unwrap(),
+            "ua3mxwoUQ1yWgVpJXSkKYg@geopod-ismtpd-4"
+        );
+    }
+
+    #[test]
+    fn an_email_without_the_header_says_why_it_cannot_be_opened() {
+        let err = parse_message_id("
+só corpo aqui
+").unwrap_err();
+        assert!(err.contains("Message-ID"), "{err}");
+    }
+
+    #[test]
+    fn the_gmail_link_searches_by_message_id_in_the_right_account() {
+        let url = gmail_url("voce@exemplo.com", "abc+def/ghi=@mail.example.com");
+        assert!(url.starts_with("https://mail.google.com/mail/u/?authuser=voce%40exemplo.com"));
+        assert!(url.contains("#search/rfc822msgid%3A"), "{url}");
+        // `+`, `/`, `=` e `@` escapados: sem isso o Gmail lê parte do id como
+        // outra coisa e não acha a mensagem.
+        assert!(url.ends_with("abc%2Bdef%2Fghi%3D%40mail.example.com"), "{url}");
+    }
+
+    #[test]
+    fn without_a_configured_address_the_link_falls_back_to_the_first_account() {
+        let url = gmail_url("", "x@y");
+        assert!(url.starts_with("https://mail.google.com/mail/u/0/#search/"), "{url}");
+    }
 
     // Amostra real de `himalaya envelope list -a work -o json` (stdout).
     const SAMPLE: &str = r#"[{"id":"822","flags":["Seen"],"subject":"RE: Report JSM","from":{"name":"Alexander Bonfim","addr":"alexander.bonfim@nimbleevolution.com"},"to":{"name":"x","addr":"x@y.com"},"date":"2026-06-09 13:12+00:00","has_attachment":false},{"id":"821","flags":[],"subject":"Sem nome no from","from":{"name":"","addr":"raw@addr.com"},"to":{"name":"x","addr":"x@y.com"},"date":"2026-06-09 12:03+00:00","has_attachment":false}]"#;
