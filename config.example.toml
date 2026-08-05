@@ -1,0 +1,52 @@
+# daily-tui — config.
+#
+# Copie para o lugar que o seu sistema usa:
+#   Linux/mac  ~/.config/daily-tui/config.toml
+#   Windows    %APPDATA%\daily-tui\config.toml
+# ou rode `daily-tui --init`, que faz essa cópia para você.
+#
+# Nada aqui é segredo. Tokens continuam em variável de ambiente (JIRA_TOKEN,
+# GITHUB_TOKEN) ou no keychain do sistema — nunca neste arquivo.
+#
+# Sem config, o painel roda com tudo ligado e duas contas (`work` e `personal`).
+
+# Quais painéis existem. Painel desligado não aparece, não recebe foco, não
+# busca nada — e você não precisa autenticar a ferramenta dele.
+[panels]
+email  = true   # himalaya (IMAP)
+jira   = true   # helper `jira` (REST do Jira Cloud)
+agenda = true   # gcalcli (Google Calendar)
+pulls  = true   # ghpending (GitHub)
+tasks  = true   # helper `mstodo` (Microsoft To Do)
+
+# Até duas contas, usadas pelos painéis de e-mail e agenda.
+# Quem tem uma conta só apaga o segundo bloco.
+[[accounts]]
+id       = "work"              # nome da conta no himalaya (`himalaya account list`)
+label    = "W"                 # marcador na lista: [W]
+email    = "voce@empresa.com"  # calendar primária no gcalcli
+calendar = "work"              # subpasta em ~/.local/share/gcalcli-accounts
+
+[[accounts]]
+id       = "personal"
+label    = "P"
+email    = "voce@gmail.com"
+calendar = "personal"
+
+[email]
+limit = 30   # envelopes buscados por conta
+
+[jira]
+cloud = "empresa.atlassian.net"   # domínio da sua instância
+email = "voce@empresa.com"        # e-mail da conta Atlassian
+# O token vem de JIRA_TOKEN no ambiente.
+
+[tasks]
+# Vazio = lista padrão do To Do ("Tarefas").
+list = ""
+# Client público first-party da Microsoft ("Microsoft Graph Command Line
+# Tools"): não é segredo e não exige app registration próprio.
+client_id = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+
+[refresh]
+seconds = 300   # de quanto em quanto tempo tudo é rebuscado
