@@ -1,0 +1,40 @@
+name: CI
+
+# Existe por um motivo concreto: `#[cfg(windows)]` faz o compilador ignorar o
+# outro lado, então código do ramo Unix pode ser escrito numa máquina Windows
+# sem nunca passar pelo compilador. Aqui os três sistemas compilam e rodam os
+# testes — é o que garante que quem clonar no Linux ou no mac consiga buildar.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      # Sem fail-fast: quando um sistema quebra, ainda quero saber dos outros
+      # dois na mesma execução.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sem action de toolchain: os runners do GitHub já vêm com Rust stable, e
+      # uma dependência a menos é uma superfície de confiança a menos num repo
+      # público.
+      - name: Versões
+        run: |
+          rustc --version
+          cargo --version
+
+      # `--locked` faz o build usar o Cargo.lock versionado: se ele estiver
+      # desatualizado, isso aparece aqui em vez de na máquina de quem clonou.
+      - name: Testes
+        run: cargo test --locked
+
+      # Informativo: o projeto carrega 3 warnings conhecidos, então clippy não
+      # é gate — mas warning novo fica visível no log.
+      - name: Clippy
+        run: cargo clippy --all-targets --locked
