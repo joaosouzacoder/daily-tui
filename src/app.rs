@@ -171,6 +171,50 @@ pub enum Prompt {
     },
 }
 
+/// Identidade de um e-mail. O id do himalaya é a UID da pasta, única só dentro
+/// da conta — as duas contas repetem números, então a conta faz parte da chave.
+pub type EmailKey = (Account, String);
+
+/// Escritas de e-mail já aplicadas na tela e ainda não confirmadas pelo servidor.
+///
+/// O worker é sequencial e cada escrita termina com uma re-busca, então uma
+/// exclusão pedida enquanto outra escrita roda espera na fila. Sem registro do
+/// que está pendente, a lista que chega no meio do caminho é a do servidor
+/// *antes* da exclusão e o e-mail excluído reaparece — foi o que acontecia ao
+/// marcar como lido e excluir em seguida. Aqui a intenção sobrevive a essas
+/// listas até o servidor responder sobre ela.
+#[derive(Default)]
+pub struct EmailPending {
+    /// Alvos de exclusão/mudança de pasta que já saíram da tela.
+    removed: std::collections::HashSet<EmailKey>,
+    /// Alvos de marcar/desmarcar como lido, com o estado pedido.
+    seen: std::collections::HashMap<EmailKey, bool>,
+}
+
+impl EmailPending {
+    /// Reaplica as escritas pendentes sobre uma lista vinda do servidor.
+    fn apply(&self, items: &mut Vec<EmailItem>) {
+        if self.removed.is_empty() && self.seen.is_empty() {
+            return;
+        }
+        items.retain(|e| !self.removed.contains(&(e.account, e.id.clone())));
+        for e in items.iter_mut() {
+            if let Some(seen) = self.seen.get(&(e.account, e.id.clone())) {
+                e.unread = !seen;
+            }
+        }
+    }
+
+    /// Encerra a pendência dos alvos: o servidor já disse o que aconteceu com
+    /// eles, e a lista que vem com essa resposta passa a ser a verdade.
+    fn settle(&mut self, targets: &[EmailKey]) {
+        for key in targets {
+            self.removed.remove(key);
+            self.seen.remove(key);
+        }
+    }
+}
+
 /// Modelo principal da aplicação.
 pub struct App {
     pub theme: BubbleTheme,
@@ -183,8 +227,10 @@ pub struct App {
     pub jira_filter: JiraFilter,
     /// Ids das tarefas com as subtarefas expandidas no painel.
     pub tasks_expanded: std::collections::HashSet<String>,
-    /// Ids dos e-mails marcados para ação em lote (`Shift`+setas marca).
-    pub emails_marked: std::collections::HashSet<String>,
+    /// E-mails marcados para ação em lote (`Shift`+setas marca).
+    pub emails_marked: std::collections::HashSet<EmailKey>,
+    /// Escritas de e-mail ainda não confirmadas pelo servidor.
+    emails_pending: EmailPending,
     /// Pastas por conta, buscadas uma vez por sessão para o seletor de "mover".
     pub folders: std::collections::HashMap<Account, Vec<String>>,
     /// Corpos já buscados, por (conta, id). O corpo do e-mail sob o cursor é
@@ -224,6 +270,7 @@ impl App {
             jira_view: JiraView::default(),
             tasks_expanded: std::collections::HashSet::new(),
             emails_marked: std::collections::HashSet::new(),
+            emails_pending: EmailPending::default(),
             folders: std::collections::HashMap::new(),
             bodies: std::collections::HashMap::new(),
             pending_bodies: std::collections::HashSet::new(),
@@ -365,14 +412,22 @@ impl App {
         }
         // No lote com estados mistos, "marcar como lido" é o que se espera:
         // basta um não lido para a ação virar marcar todos.
-        let ids: std::collections::HashSet<&String> = items.iter().map(|(_, id)| id).collect();
+        let keys: std::collections::HashSet<EmailKey> = items.iter().cloned().collect();
         let seen = self
             .emails
             .items
             .iter()
-            .any(|e| ids.contains(&e.id) && e.unread);
-        for e in self.emails.items.iter_mut().filter(|e| ids.contains(&e.id)) {
+            .any(|e| keys.contains(&(e.account, e.id.clone())) && e.unread);
+        for e in self
+            .emails
+            .items
+            .iter_mut()
+            .filter(|e| keys.contains(&(e.account, e.id.clone())))
+        {
             e.unread = !seen;
+        }
+        for key in keys {
+            self.emails_pending.seen.insert(key, seen);
         }
         let _ = self.cmd_tx.send(WorkerCmd::EmailSetSeen { items, seen });
     }
@@ -428,8 +483,9 @@ impl App {
         let Some(item) = self.emails.items.get(self.emails.cursor) else {
             return;
         };
-        if !self.emails_marked.remove(&item.id) {
-            self.emails_marked.insert(item.id.clone());
+        let key = (item.account, item.id.clone());
+        if !self.emails_marked.remove(&key) {
+            self.emails_marked.insert(key);
         }
     }
 
@@ -437,11 +493,11 @@ impl App {
     /// novo. Assim segurar `Shift` e andar deixa marcado tudo por onde passou.
     fn extend_mark(&mut self, delta: isize) {
         if let Some(item) = self.emails.items.get(self.emails.cursor) {
-            self.emails_marked.insert(item.id.clone());
+            self.emails_marked.insert((item.account, item.id.clone()));
         }
         self.emails.move_cursor(delta);
         if let Some(item) = self.emails.items.get(self.emails.cursor) {
-            self.emails_marked.insert(item.id.clone());
+            self.emails_marked.insert((item.account, item.id.clone()));
         }
     }
 
@@ -460,16 +516,29 @@ impl App {
         self.emails
             .items
             .iter()
-            .filter(|e| self.emails_marked.contains(&e.id))
+            .filter(|e| self.emails_marked.contains(&(e.account, e.id.clone())))
             .map(|e| (e.account, e.id.clone()))
             .collect()
     }
 
+    /// Troca a lista de e-mails por uma vinda do servidor, sem perder as
+    /// escritas que ainda estão na fila do worker.
+    fn set_emails(&mut self, mut res: Result<Vec<EmailItem>, String>) {
+        if let Ok(items) = &mut res {
+            self.emails_pending.apply(items);
+        }
+        self.emails.set(res);
+    }
+
     /// Remove os e-mails da lista exibida e limpa a marcação, mantendo o cursor
     /// dentro dos limites. A re-busca que vem depois é quem diz a verdade.
-    fn drop_emails(&mut self, items: &[(Account, String)]) {
-        let ids: std::collections::HashSet<&String> = items.iter().map(|(_, id)| id).collect();
-        self.emails.items.retain(|e| !ids.contains(&e.id));
+    fn drop_emails(&mut self, items: &[EmailKey]) {
+        for key in items {
+            self.emails_pending.removed.insert(key.clone());
+        }
+        self.emails
+            .items
+            .retain(|e| !items.contains(&(e.account, e.id.clone())));
         self.emails_marked.clear();
         self.emails.clamp_cursor();
     }
@@ -823,7 +892,24 @@ impl Model for App {
                 }
             }
             Msg::EmailsLoaded(res) => {
-                self.emails.set(res);
+                self.set_emails(res);
+                self.last_refresh = Some(Local::now());
+            }
+            Msg::EmailWrite {
+                targets,
+                error,
+                list,
+            } => {
+                // A resposta chegou sobre estes alvos: a lista que vem com ela
+                // já os reflete, então a intenção local sai de cena aqui.
+                self.emails_pending.settle(&targets);
+                self.set_emails(list);
+                if let Some(e) = error {
+                    // Escrita falhou: os alvos voltam do servidor de propósito —
+                    // some da tela o que não aconteceu de verdade — e o motivo
+                    // aparece no painel em vez de sumir junto.
+                    self.emails.error = Some(e);
+                }
                 self.last_refresh = Some(Local::now());
             }
             Msg::AgendaLoaded(res) => self.agenda.set(res),
@@ -1032,7 +1118,9 @@ mod tests {
         work.account = Account::Work;
         app.emails.items = vec![work, email_item("2", false)]; // 2 é Personal
         app.emails.loaded = true;
-        app.emails_marked = ["1".to_string(), "2".to_string()].into_iter().collect();
+        app.emails_marked = [(Account::Work, "1".to_string()), (Account::Personal, "2".to_string())]
+            .into_iter()
+            .collect();
         app.folders
             .insert(Account::Work, vec!["Clientes".into()]);
         app.folders
@@ -1056,7 +1144,9 @@ mod tests {
         work.account = Account::Work;
         app.emails.items = vec![work, email_item("2", false)];
         app.emails.loaded = true;
-        app.emails_marked = ["1".to_string(), "2".to_string()].into_iter().collect();
+        app.emails_marked = [(Account::Work, "1".to_string()), (Account::Personal, "2".to_string())]
+            .into_iter()
+            .collect();
         app.prompt = Some(Prompt::PickFolder {
             items: vec![
                 (Account::Work, "1".to_string()),
@@ -1080,7 +1170,7 @@ mod tests {
         app.emails.loaded = true;
 
         app.update(key(KeyCode::Char('x')));
-        assert!(app.emails_marked.contains("1"));
+        assert!(app.emails_marked.contains(&(Account::Personal, "1".to_string())));
         app.update(key(KeyCode::Char('x')));
         assert!(app.emails_marked.is_empty(), "o mesmo `x` desmarca");
 
@@ -1091,7 +1181,10 @@ mod tests {
         assert_eq!(app.emails_marked.len(), 2);
         app.update(key(KeyCode::Char('x')));
         assert_eq!(app.emails_marked.len(), 1, "sai só o do cursor");
-        assert!(app.emails_marked.contains("1"), "o outro fica marcado");
+        assert!(
+            app.emails_marked.contains(&(Account::Personal, "1".to_string())),
+            "o outro fica marcado"
+        );
     }
 
     #[test]
@@ -1124,7 +1217,12 @@ mod tests {
             email_item("3", true),
         ];
         app.emails.loaded = true;
-        app.emails_marked = ["1".to_string(), "3".to_string()].into_iter().collect();
+        app.emails_marked = [
+            (Account::Personal, "1".to_string()),
+            (Account::Personal, "3".to_string()),
+        ]
+        .into_iter()
+        .collect();
 
         app.update(key(KeyCode::Char('d')));
         match &app.prompt {
@@ -1145,7 +1243,12 @@ mod tests {
         let mut app = test_app();
         app.emails.items = vec![email_item("1", true), email_item("2", false)];
         app.emails.loaded = true;
-        app.emails_marked = ["1".to_string(), "2".to_string()].into_iter().collect();
+        app.emails_marked = [
+            (Account::Personal, "1".to_string()),
+            (Account::Personal, "2".to_string()),
+        ]
+        .into_iter()
+        .collect();
 
         app.update(key(KeyCode::Char(' ')));
         assert!(
@@ -1179,6 +1282,91 @@ mod tests {
         assert_eq!(app.emails.items.len(), 1);
         assert_eq!(app.emails.items[0].id, "1");
         assert_eq!(app.emails.cursor, 0, "o cursor não fica fora dos limites");
+    }
+
+    #[test]
+    fn a_deleted_email_does_not_come_back_with_a_list_from_before_the_delete() {
+        // O bug: marcar como lido e excluir em seguida. A escrita do "lido"
+        // termina com uma re-busca, e essa lista — pedida antes da exclusão
+        // chegar ao servidor — trazia o e-mail de volta. O usuário excluía de
+        // novo, e a segunda tentativa falhava porque o e-mail já tinha saído.
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", false), email_item("2", false)];
+        app.emails.loaded = true;
+        app.emails.cursor = 1;
+
+        app.update(key(KeyCode::Char('d')));
+        app.update(key(KeyCode::Char('y')));
+
+        // Lista do servidor de antes da exclusão (a re-busca da escrita anterior).
+        app.update(Msg::EmailsLoaded(Ok(vec![
+            email_item("1", false),
+            email_item("2", false),
+        ])));
+        assert_eq!(
+            app.emails.items.iter().map(|e| &e.id).collect::<Vec<_>>(),
+            vec!["1"],
+            "o excluído não reaparece enquanto a exclusão está na fila"
+        );
+
+        // Resposta da própria exclusão: daqui em diante a lista do servidor vale.
+        app.update(Msg::EmailWrite {
+            targets: vec![(Account::Personal, "2".to_string())],
+            error: None,
+            list: Ok(vec![email_item("1", false)]),
+        });
+        app.update(Msg::EmailsLoaded(Ok(vec![
+            email_item("1", false),
+            email_item("2", false),
+        ])));
+        assert_eq!(
+            app.emails.items.len(),
+            2,
+            "encerrada a pendência, o servidor volta a mandar na lista"
+        );
+    }
+
+    #[test]
+    fn a_failed_delete_brings_the_email_back_and_says_why() {
+        // Falhar em silêncio era pior: sumia da tela, voltava no reload seguinte
+        // e o motivo nunca aparecia.
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", false)];
+        app.emails.loaded = true;
+
+        app.update(key(KeyCode::Char('d')));
+        app.update(key(KeyCode::Char('y')));
+        assert!(app.emails.items.is_empty(), "sai da tela na hora");
+
+        app.update(Msg::EmailWrite {
+            targets: vec![(Account::Personal, "1".to_string())],
+            error: Some("himalaya falhou: pasta não encontrada".into()),
+            list: Ok(vec![email_item("1", false)]),
+        });
+        assert_eq!(app.emails.items.len(), 1, "volta: não foi excluído mesmo");
+        assert_eq!(
+            app.emails.error.as_deref(),
+            Some("himalaya falhou: pasta não encontrada")
+        );
+    }
+
+    #[test]
+    fn the_same_id_in_two_accounts_is_two_different_emails() {
+        // O id do himalaya é a UID da pasta: as duas contas repetem números.
+        let mut app = test_app();
+        let mut work = email_item("7", false);
+        work.account = Account::Work;
+        app.emails.items = vec![work, email_item("7", false)]; // o segundo é Personal
+        app.emails.loaded = true;
+        app.emails.cursor = 0; // o do work
+
+        app.update(key(KeyCode::Char('x')));
+        assert_eq!(app.emails_marked.len(), 1, "marca só o do work");
+
+        app.update(key(KeyCode::Char('d')));
+        app.update(key(KeyCode::Char('y')));
+        assert_eq!(app.emails.items.len(), 1, "o da conta pessoal fica");
+        assert_eq!(app.emails.items[0].account, Account::Personal);
     }
 
     #[test]

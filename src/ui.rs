@@ -154,7 +154,7 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
             };
             // Marcado para ação em lote: o ✓ vem antes de tudo, para a faixa
             // marcada ser lida de relance na coluna da esquerda.
-            let mark = if app.emails_marked.contains(&e.id) {
+            let mark = if app.emails_marked.contains(&(e.account, e.id.clone())) {
                 theme.accent("✓ ")
             } else {
                 theme.span("  ")

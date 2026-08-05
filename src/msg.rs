@@ -26,6 +26,15 @@ pub enum Msg {
     TasksLoaded(Result<Vec<TaskItem>, String>),
     /// Pastas de uma conta, para o seletor de "mover" (inclui as etiquetas).
     FoldersLoaded(crate::data::Account, Result<Vec<String>, String>),
+    /// Fim de uma escrita de e-mail (lido, mover, excluir): os alvos, o erro
+    /// se houve, e a lista do servidor depois da escrita. Vem tudo junto porque
+    /// só quando o servidor responde é que a lista dele passa a valer mais do
+    /// que a intenção já aplicada na tela.
+    EmailWrite {
+        targets: Vec<(crate::data::Account, String)>,
+        error: Option<String>,
+        list: Result<Vec<EmailItem>, String>,
+    },
     /// Corpo de um e-mail. Carrega a chave porque o corpo é buscado em segundo
     /// plano: quando chega, pode não ser mais o e-mail sob o cursor.
     EmailBody(crate::data::Account, String, Result<String, String>),

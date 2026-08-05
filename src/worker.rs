@@ -110,16 +110,17 @@ pub fn spawn(
                     let body = email::fetch_body(account, &id);
                     let _ = ui.send(Msg::EmailBody(account, id, body));
                 }
-                Ok(WorkerCmd::EmailSetSeen { items, seen }) => mutate_emails(
-                    &ui,
-                    each(&items, |account, id| email::set_seen(account, id, seen)),
-                ),
-                Ok(WorkerCmd::EmailMove { items, folder }) => mutate_emails(
-                    &ui,
-                    each(&items, |account, id| email::move_to(account, id, &folder)),
-                ),
+                Ok(WorkerCmd::EmailSetSeen { items, seen }) => {
+                    let done = each(&items, |account, id| email::set_seen(account, id, seen));
+                    mutate_emails(&ui, items, done);
+                }
+                Ok(WorkerCmd::EmailMove { items, folder }) => {
+                    let done = each(&items, |account, id| email::move_to(account, id, &folder));
+                    mutate_emails(&ui, items, done);
+                }
                 Ok(WorkerCmd::EmailDelete { items }) => {
-                    mutate_emails(&ui, each(&items, email::delete))
+                    let done = each(&items, email::delete);
+                    mutate_emails(&ui, items, done);
                 }
                 Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
                 Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),
@@ -205,11 +206,21 @@ where
 }
 
 /// Aplica uma escrita no e-mail e re-busca a lista das duas contas — o painel
-/// reflete o servidor, nunca um palpite local. Erro na escrita vai para o painel
-/// e a lista fica como estava.
-fn mutate_emails(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
-    let loaded = result.and_then(|()| fetch_emails());
-    let _ = ui.send(Msg::EmailsLoaded(loaded));
+/// reflete o servidor, nunca um palpite local.
+///
+/// A re-busca acontece mesmo quando a escrita falha: é assim que a tela volta à
+/// verdade em vez de manter para sempre a exclusão que o servidor recusou. O
+/// erro viaja junto para o painel poder dizer o motivo.
+fn mutate_emails(
+    ui: &ProgramHandle<Msg>,
+    targets: Vec<(Account, String)>,
+    result: Result<(), String>,
+) {
+    let _ = ui.send(Msg::EmailWrite {
+        targets,
+        error: result.err(),
+        list: fetch_emails(),
+    });
 }
 
 /// Agrega e-mails das duas contas e ordena do mais recente para o mais antigo.
