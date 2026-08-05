@@ -31,7 +31,7 @@ import requests
 
 TIMEOUT = 30
 ORDER = "ORDER BY project ASC, updated DESC"
-FIELDS = ["summary", "status", "project", "parent", "assignee", "reporter"]
+FIELDS = ["summary", "status", "project", "parent", "assignee", "reporter", "issuetype"]
 
 # Cláusulas por modo de filtro. O modo `reporter` NÃO usa `statusCategory != Done`
 # como os outros: essa combinação devolve mais de 100 issues, quase todas de um
@@ -125,6 +125,10 @@ def to_item(issue, cloud, me):
         "status": ((fields.get("status") or {}).get("name") or "").strip(),
         "project": ((fields.get("project") or {}).get("key") or "").strip(),
         "url": f"https://{cloud}/browse/{issue['key']}",
+        # Nome do tipo como o Jira o chama — a instância pode estar em outro
+        # idioma (na do autor: "História", "Iniciativa"). Quem traduz para o
+        # marcador de uma letra é o painel.
+        "type": ((fields.get("issuetype") or {}).get("name") or "").strip(),
         "parent": None,
         "role": role_of(fields, me),
     }

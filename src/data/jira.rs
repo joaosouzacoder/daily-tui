@@ -21,6 +21,26 @@ pub struct JiraItem {
     /// Por que a issue está no resultado (assignee/reporter/both).
     #[serde(default)]
     pub role: JiraRole,
+    /// Nome do tipo como o Jira o chama (`História`, `Epic`, `Iniciativa`…).
+    #[serde(default, rename = "type")]
+    pub kind: String,
+}
+
+/// Marcador de uma letra para o tipo da issue.
+///
+/// O nome vem no idioma da instância — a do autor responde `História` e
+/// `Iniciativa`, não `Story`/`Initiative` —, então os dois idiomas entram no
+/// mapa. Tipo fora do mapa vira `[?]`: inventar uma letra pela inicial faria
+/// `[System] Service request` virar `[S]`, indistinguível de história.
+pub fn type_marker(kind: &str) -> &'static str {
+    let k = kind.trim().to_lowercase();
+    match k.as_str() {
+        "história" | "historia" | "story" => "[S]",
+        "epic" | "épico" | "epico" => "[E]",
+        "iniciativa" | "initiative" => "[I]",
+        "objetivo" | "objective" => "[O]",
+        _ => "[?]",
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -253,7 +273,7 @@ mod tests {
     // (para exercitar UTF-8).
     const REAL: &str = r#"[
       {"key":"ENG-101","summary":"[Painel] - Melhorias no dashboard de métricas","status":"Em andamento",
-       "project":"ENG","url":"https://example.atlassian.net/browse/ENG-101",
+       "project":"ENG","url":"https://example.atlassian.net/browse/ENG-101","type":"História",
        "parent":{"key":"ENG-1","summary":"Iniciativa de Engenharia"}},
       {"key":"OPS-55","summary":"Revisão de configuração de acesso","status":"Em Andamento",
        "project":"OPS","url":"https://example.atlassian.net/browse/OPS-55","parent":null},
@@ -276,6 +296,34 @@ mod tests {
     fn null_parent_and_missing_fields_are_tolerated() {
         let items = parse_issues(r#"[{"key":"A-1","summary":"s","status":"","project":"A","url":"u","parent":null}]"#).unwrap();
         assert!(items[0].parent.is_none());
+    }
+
+    #[test]
+    fn the_type_becomes_a_one_letter_marker_in_either_language() {
+        // A instância do autor responde em português; o mapa cobre os dois.
+        assert_eq!(type_marker("História"), "[S]");
+        assert_eq!(type_marker("Story"), "[S]");
+        assert_eq!(type_marker("Epic"), "[E]");
+        assert_eq!(type_marker("Épico"), "[E]");
+        assert_eq!(type_marker("Iniciativa"), "[I]");
+        assert_eq!(type_marker("Initiative"), "[I]");
+        assert_eq!(type_marker("Objetivo"), "[O]");
+        assert_eq!(type_marker("Objective"), "[O]");
+    }
+
+    #[test]
+    fn a_type_without_a_letter_says_so_instead_of_guessing() {
+        // Pela inicial, `[System] Service request` viraria `[S]` — o mesmo
+        // marcador de história.
+        assert_eq!(type_marker("[System] Service request"), "[?]");
+        assert_eq!(type_marker(""), "[?]");
+    }
+
+    #[test]
+    fn the_type_is_read_from_the_helper_output() {
+        let items = parse_issues(REAL).unwrap();
+        assert_eq!(items[0].kind, "História");
+        assert_eq!(items[1].kind, "", "ausente no JSON não é erro");
     }
 
     #[test]

@@ -273,8 +273,11 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
 /// `show_role` só é verdadeiro no filtro `ambas` fora da visão de menções —
 /// nos outros casos o papel não distingue nada, e mostrá-lo seria ruído.
 fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool, avail: usize) -> Line<'static> {
+    // O tipo vem antes da chave: é o que diz se a linha é uma história do dia a
+    // dia ou uma iniciativa acima dela, e lido em coluna se compara de relance.
+    let kind = jira::type_marker(&item.kind);
     let mut spans = vec![
-        theme.span("  "),
+        theme.muted(format!("  {kind} ")),
         theme.accent(item.key.clone()),
         theme.muted(format!(" [{}] ", item.status)),
     ];
@@ -288,7 +291,12 @@ fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool, avail: usiz
     };
     let summary_width = room_for(
         avail,
-        2 + item.key.chars().count() + item.status.chars().count() + 4 + role_w,
+        2 + kind.chars().count()
+            + 1
+            + item.key.chars().count()
+            + item.status.chars().count()
+            + 4
+            + role_w,
     );
     spans.push(theme.span(clip(&item.summary, summary_width)));
     Line::from(spans)
@@ -985,6 +993,22 @@ mod tests {
         assert!(out.contains("JIRA · minhas"), "cabeçalho com o filtro ativo");
         assert!(out.contains("ENG"), "cabeçalho de grupo do projeto");
         assert!(out.contains("ENG-101"), "a chave da issue");
+    }
+
+    #[test]
+    fn each_issue_line_opens_with_the_type_marker() {
+        let mut app = test_app();
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-101","summary":"Melhorias no dashboard","status":"Em andamento",
+                 "project":"ENG","url":"u","parent":null,"type":"História"},
+                {"key":"ENG-1","summary":"Plataforma","status":"Em andamento",
+                 "project":"ENG","url":"u","parent":null,"type":"Iniciativa"}]"#,
+        )
+        .unwrap();
+        app.jira.loaded = true;
+        let out = render_to_string(&app, 120, 30);
+        assert!(out.contains("[S] ENG-101"), "história marcada com [S]");
+        assert!(out.contains("[I] ENG-1"), "iniciativa marcada com [I]");
     }
 
     #[test]

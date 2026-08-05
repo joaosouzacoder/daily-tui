@@ -465,6 +465,11 @@ identidade é a issue, então uma menção dispensada fica dispensada. Hoje ela 
 no Jira dos últimos 30 dias; foi desenhada para receber outras fontes — convites
 de agenda para aceitar, menções no GitHub — sem mudar o overlay.
 
+Cada linha do painel de Jira abre com o tipo da issue: `[S]` história, `[E]`
+épico, `[I]` iniciativa, `[O]` objetivo. O nome do tipo vem no idioma da sua
+instância (a do autor responde `História`/`Iniciativa`), e os dois idiomas estão
+no mapa; tipo fora dele aparece como `[?]` em vez de virar uma letra chutada.
+
 No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
 o filtro (`minhas` → `relator` → `ambas`) · `p` mostra as issues agrupadas por
 pai · `Esc` volta para a visão de issues. O rodapé mostra essas teclas sempre que

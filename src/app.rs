@@ -1644,6 +1644,7 @@ mod tests {
             url: format!("https://example.atlassian.net/browse/{key}"),
             parent: None,
             role: Default::default(),
+            kind: "História".into(),
         }
     }
 
