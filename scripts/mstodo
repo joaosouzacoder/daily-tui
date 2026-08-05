@@ -14,8 +14,12 @@ Subcomandos:
   mstodo add "<título>"
   mstodo complete <id>
   mstodo reopen <id>
-  mstodo edit <id> "<título>"
+  mstodo edit <id> ["<título>"] [--title T] [--due AAAA-MM-DD|none]
+                   [--recur none|daily|weekly|monthly] [--priority low|normal|high]
   mstodo delete <id>
+  mstodo subtask <tarefa> "<título>"          # cria uma etapa
+  mstodo subtask-edit <tarefa> <item> "<t>"   # renomeia a etapa
+  mstodo subtask-delete <tarefa> <item>
   mstodo check <tarefa> <item>     # marca uma subtarefa ("etapa" no app To Do)
   mstodo uncheck <tarefa> <item>
 
@@ -30,6 +34,7 @@ resumo (ver `stderr_summary` em src/data/mod.rs), então traceback não ajuda.
 import json
 import os
 import sys
+from datetime import date
 from functools import cache
 from pathlib import Path
 
@@ -188,6 +193,11 @@ def to_item(task):
         "title": (task.get("title") or "").strip(),
         "completed": task.get("status") == "completed",
         "due": due,
+        # `importance` do Graph: low/normal/high.
+        "priority": task.get("importance") or "normal",
+        # Só o tipo do padrão interessa ao painel (daily/weekly/monthly); o
+        # intervalo e os dias vivem no Graph e são derivados da data.
+        "recur": (((task.get("recurrence") or {}).get("pattern") or {}).get("type") or ""),
         "notes": ((task.get("body") or {}).get("content") or "").strip(),
         # O To Do chama de "etapa"; no Graph é checklistItem. Vem embutido pelo
         # $expand do `list`, sem custo de chamada por tarefa.
@@ -232,8 +242,70 @@ def do_reopen(tid):
     in_list("PATCH", f"/{tid}", json={"status": "notStarted"})
 
 
-def do_edit(tid, title):
-    in_list("PATCH", f"/{tid}", json={"title": title})
+# Padrões de recorrência que o painel oferece. `absoluteMonthly` precisa do dia
+# do mês e `weekly` do dia da semana, ambos derivados da data de vencimento —
+# por isso a recorrência sempre exige uma data.
+RECUR = {"daily": "daily", "weekly": "weekly", "monthly": "absoluteMonthly"}
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def due_body(due):
+    """Corpo do `dueDateTime`, ou None para limpar a data."""
+    if due == "none":
+        return None
+    # O To Do guarda vencimento como meia-noite UTC; sem o timeZone o Graph
+    # recusa o objeto.
+    return {"dateTime": f"{due}T00:00:00.0000000", "timeZone": "UTC"}
+
+
+def recur_body(recur, anchor):
+    """Corpo do `recurrence` para a data âncora dada.
+
+    O `range` vai SEM `startDate`: o Graph recusa qualquer valor ali — inclusive
+    ISO válido, com "Invalid JSON ... to type Edm.Date" — e preenche o início a
+    partir da própria data de vencimento (medido em 2026-08-04).
+    """
+    pattern = {"type": RECUR[recur], "interval": 1}
+    if recur == "weekly":
+        pattern["daysOfWeek"] = [WEEKDAYS[anchor.weekday()]]
+    elif recur == "monthly":
+        pattern["dayOfMonth"] = anchor.day
+    return {"pattern": pattern, "range": {"type": "noEnd"}}
+
+
+def current_due(tid):
+    """Data de vencimento que a tarefa já tem, ou None."""
+    task = in_list("GET", f"/{tid}").json()
+    raw = ((task.get("dueDateTime") or {}).get("dateTime") or "")[:10]
+    return date.fromisoformat(raw) if raw else None
+
+
+def do_edit(tid, title=None, due=None, recur=None, priority=None):
+    body = {}
+    if title is not None:
+        body["title"] = title
+    if due is not None:
+        body["dueDateTime"] = due_body(due)
+    if priority is not None:
+        body["importance"] = priority
+    if recur == "none":
+        body["recurrence"] = None
+    elif recur is not None:
+        if due == "none":
+            die("recorrência exige data de vencimento")
+        # A âncora vem da data sendo gravada; se a edição não mexe na data, da
+        # que a tarefa já tem.
+        anchor = date.fromisoformat(due) if due else current_due(tid)
+        if anchor is None:
+            die("recorrência exige data de vencimento")
+        body["recurrence"] = recur_body(recur, anchor)
+        # O Graph exige a data no MESMO pedido em que a recorrência muda, mesmo
+        # quando a tarefa já tem uma: "The property 'dueDateTime' is required
+        # when updating/creating Recurrence in the task entity".
+        body.setdefault("dueDateTime", due_body(anchor.isoformat()))
+    if not body:
+        die("nada para mudar")
+    in_list("PATCH", f"/{tid}", json=body)
 
 
 def do_subtask(task_id, title):
@@ -260,6 +332,32 @@ def do_delete(tid):
     in_list("DELETE", f"/{tid}")
 
 
+def edit_flags(args):
+    """Lê `[título] [--title T] [--due D] [--recur R] [--priority P]`.
+
+    O título posicional continua aceito: era a única forma antes dos campos de
+    data, recorrência e prioridade existirem.
+    """
+    out = {}
+    rest = list(args)
+    if rest and not rest[0].startswith("--"):
+        out["title"] = rest.pop(0)
+    while rest:
+        flag = rest.pop(0)
+        name = {"--title": "title", "--due": "due", "--recur": "recur",
+                "--priority": "priority"}.get(flag)
+        if name is None:
+            die(f"flag desconhecida em edit: {flag}")
+        if not rest:
+            die(f"{flag} sem valor")
+        out[name] = rest.pop(0)
+    if out.get("recur") not in (None, "none", *RECUR):
+        die(f"recorrência inválida: {out['recur']}")
+    if out.get("priority") not in (None, "low", "normal", "high"):
+        die(f"prioridade inválida: {out['priority']}")
+    return out
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -279,7 +377,7 @@ def main():
     elif cmd == "reopen":
         do_reopen(rest[0])
     elif cmd == "edit":
-        do_edit(rest[0], rest[1])
+        do_edit(rest[0], **edit_flags(rest[1:]))
     elif cmd == "delete":
         do_delete(rest[0])
     elif cmd == "subtask":

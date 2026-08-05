@@ -144,8 +144,6 @@ pub struct Detail {
 pub enum InputKind {
     /// Criar uma nova tarefa.
     AddTask,
-    /// Editar o título da tarefa com este id.
-    EditTask { id: String },
     /// Criar uma subtarefa na tarefa com este id.
     AddSubtask { task_id: String },
     /// Renomear a subtarefa `item_id` da tarefa `task_id`.
@@ -156,6 +154,10 @@ pub enum InputKind {
 pub enum Prompt {
     /// Campo de texto (criar/editar tarefa).
     Input { kind: InputKind, buffer: String },
+    /// Formulário de edição de uma tarefa: título, vencimento, repetição e
+    /// prioridade numa tela só, porque o Graph exige data e recorrência no mesmo
+    /// pedido — e porque quatro prompts em fila para uma tarefa é castigo.
+    EditTask(TaskForm),
     /// Confirmação de exclusão da tarefa selecionada.
     ConfirmDelete { id: String, title: String },
     /// Confirmação de exclusão da subtarefa selecionada.
@@ -181,6 +183,99 @@ pub enum Prompt {
         /// O que mostrar na pergunta: o assunto, ou a contagem no lote.
         what: String,
     },
+}
+
+/// Campo em foco no formulário de edição de tarefa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskField {
+    Title,
+    Due,
+    Recur,
+    Priority,
+}
+
+impl TaskField {
+    /// Ordem em que `Tab` percorre os campos.
+    const ORDER: [TaskField; 4] = [
+        TaskField::Title,
+        TaskField::Due,
+        TaskField::Recur,
+        TaskField::Priority,
+    ];
+
+    /// Rótulo exibido à esquerda do campo.
+    pub const fn label(self) -> &'static str {
+        match self {
+            TaskField::Title => "Título",
+            TaskField::Due => "Vencimento",
+            TaskField::Recur => "Repetição",
+            TaskField::Priority => "Prioridade",
+        }
+    }
+
+    /// `true` para os campos que se digita (os outros circulam valores).
+    pub const fn typed(self) -> bool {
+        matches!(self, TaskField::Title | TaskField::Due)
+    }
+
+    fn step(self, delta: isize) -> Self {
+        let at = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0) as isize;
+        let len = Self::ORDER.len() as isize;
+        Self::ORDER[(at + delta).rem_euclid(len) as usize]
+    }
+}
+
+/// Estado do formulário de edição de uma tarefa.
+pub struct TaskForm {
+    pub id: String,
+    pub title: String,
+    /// Como digitado: `AAAA-MM-DD`, `hoje`, `+3d`… Validado ao confirmar.
+    pub due: String,
+    pub recur: tasks::Recur,
+    pub priority: tasks::Priority,
+    pub field: TaskField,
+    /// Data recusada na confirmação; some quando o campo é corrigido.
+    pub error: Option<String>,
+    /// Valores de quando o formulário abriu, para gravar só o que mudou.
+    was: (String, String, tasks::Recur, tasks::Priority),
+}
+
+impl TaskForm {
+    fn new(t: &TaskItem) -> Self {
+        Self {
+            id: t.id.clone(),
+            title: t.title.clone(),
+            due: t.due.clone(),
+            recur: t.recur,
+            priority: t.priority,
+            field: TaskField::Title,
+            error: None,
+            was: (t.title.clone(), t.due.clone(), t.recur, t.priority),
+        }
+    }
+
+    /// O que mudou, já no formato do helper. `Err` quando a data não faz sentido.
+    fn edit(&self, today: chrono::NaiveDate) -> Result<tasks::TaskEdit, String> {
+        let (was_title, was_due, was_recur, was_priority) = &self.was;
+        let title = self.title.trim().to_string();
+        let parsed = tasks::parse_due(&self.due, today)?;
+        // Guarda a data no formato do helper: `none` limpa.
+        let due = match parsed {
+            Some(d) => d.format("%Y-%m-%d").to_string(),
+            None => "none".to_string(),
+        };
+        let due_before = if was_due.is_empty() {
+            "none".to_string()
+        } else {
+            was_due.clone()
+        };
+        Ok(tasks::TaskEdit {
+            title: (!title.is_empty() && title != *was_title).then_some(title),
+            due: (due != due_before).then_some(due),
+            recur: (self.recur != *was_recur).then_some(self.recur),
+            priority: (self.priority != *was_priority).then_some(self.priority),
+        })
+    }
 }
 
 /// Identidade de um e-mail. O id do himalaya é a UID da pasta, única só dentro
@@ -327,15 +422,39 @@ impl App {
         }
     }
 
-    /// Move o cursor do painel de Tarefas sobre as linhas renderizadas.
+    /// Linhas do painel de Tarefas: cabeçalhos de prazo, tarefas e subtarefas.
+    pub fn task_rows(&self) -> Vec<tasks::TaskRow> {
+        tasks::rows(
+            &self.tasks.items,
+            &self.tasks_expanded,
+            self.now.date_naive(),
+        )
+    }
+
+    /// Move o cursor do painel de Tarefas entre as linhas em que ele pode parar.
+    ///
+    /// Anda pelas paradas, não pelos índices: cabeçalho de faixa é linha, mas
+    /// não é destino — parar nele deixaria `Espaço` e `d` sem alvo.
     fn move_task_cursor(&mut self, delta: isize) {
-        let total = tasks::rows(&self.tasks.items, &self.tasks_expanded).len();
-        if total == 0 {
+        let rows = self.task_rows();
+        let stops: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selectable())
+            .map(|(i, _)| i)
+            .collect();
+        let Some(&last) = stops.last() else {
             self.tasks.cursor = 0;
             return;
-        }
-        let max = (total - 1) as isize;
-        self.tasks.cursor = (self.tasks.cursor as isize + delta).clamp(0, max) as usize;
+        };
+        // Se o cursor caiu num cabeçalho (lista mudou embaixo dele), a parada
+        // atual é a primeira depois dele.
+        let at = stops
+            .iter()
+            .position(|&i| i >= self.tasks.cursor)
+            .unwrap_or(stops.len() - 1) as isize;
+        let target = (at + delta).clamp(0, stops.len() as isize - 1) as usize;
+        self.tasks.cursor = stops.get(target).copied().unwrap_or(last);
     }
 
     fn focused_to_first(&mut self) {
@@ -344,7 +463,12 @@ impl App {
             Panel::Jira => self.jira.to_first(),
             Panel::Agenda => self.agenda.scroll.set(0),
             Panel::Pulls => self.pulls.scroll.set(0),
-            Panel::Tasks => self.tasks.to_first(),
+            // O topo da lista de Tarefas é um cabeçalho de faixa; a primeira
+            // parada é a linha abaixo dele.
+            Panel::Tasks => {
+                self.tasks.cursor = 0;
+                self.move_task_cursor(0);
+            }
         }
     }
 
@@ -355,10 +479,11 @@ impl App {
             Panel::Jira => self.jira.to_last(),
             Panel::Agenda => self.agenda.scroll.set(usize::MAX),
             Panel::Pulls => self.pulls.scroll.set(usize::MAX),
-            // Idem: o fim da lista de Tarefas é a última linha, não a última tarefa.
+            // Idem: o fim da lista de Tarefas é a última linha, não a última
+            // tarefa — e nunca um cabeçalho.
             Panel::Tasks => {
-                let total = tasks::rows(&self.tasks.items, &self.tasks_expanded).len();
-                self.tasks.cursor = total.saturating_sub(1);
+                self.tasks.cursor = usize::MAX;
+                self.move_task_cursor(0);
             }
         }
     }
@@ -710,6 +835,7 @@ impl App {
             tasks::TaskRow::Task(t) | tasks::TaskRow::Sub { task: t, .. } => {
                 self.tasks.items.get(t)
             }
+            tasks::TaskRow::Header(_) => None,
         }
     }
 
@@ -717,7 +843,7 @@ impl App {
     /// linha é de uma tarefa.
     fn cursor_subtask(&self) -> Option<(&TaskItem, &SubTask)> {
         match self.selected_row()? {
-            tasks::TaskRow::Task(_) => None,
+            tasks::TaskRow::Task(_) | tasks::TaskRow::Header(_) => None,
             tasks::TaskRow::Sub { task, sub } => {
                 let item = self.tasks.items.get(task)?;
                 Some((item, item.subtasks.get(sub)?))
@@ -731,16 +857,14 @@ impl App {
     fn selected_task(&self) -> Option<&TaskItem> {
         match self.selected_row()? {
             tasks::TaskRow::Task(t) => self.tasks.items.get(t),
-            tasks::TaskRow::Sub { .. } => None,
+            tasks::TaskRow::Sub { .. } | tasks::TaskRow::Header(_) => None,
         }
     }
 
     /// Alterna a tarefa selecionada entre concluída e pendente.
     /// Linha sob o cursor no painel de Tarefas: uma tarefa ou uma subtarefa.
     fn selected_row(&self) -> Option<tasks::TaskRow> {
-        tasks::rows(&self.tasks.items, &self.tasks_expanded)
-            .get(self.tasks.cursor)
-            .cloned()
+        self.task_rows().get(self.tasks.cursor).cloned()
     }
 
     /// Alterna o estado da linha sob o cursor — tarefa ou subtarefa.
@@ -776,7 +900,7 @@ impl App {
                     check,
                 }
             }
-            None => return,
+            Some(tasks::TaskRow::Header(_)) | None => return,
         };
         let _ = self.cmd_tx.send(cmd);
     }
@@ -789,7 +913,7 @@ impl App {
         let t = match self.selected_row() {
             Some(tasks::TaskRow::Task(t)) => t,
             Some(tasks::TaskRow::Sub { task, .. }) => task,
-            None => return,
+            Some(tasks::TaskRow::Header(_)) | None => return,
         };
         let Some(item) = self.tasks.items.get(t) else {
             return;
@@ -801,7 +925,7 @@ impl App {
         if !self.tasks_expanded.remove(&id) {
             self.tasks_expanded.insert(id);
         }
-        let rows = tasks::rows(&self.tasks.items, &self.tasks_expanded);
+        let rows = self.task_rows();
         if let Some(pos) = rows.iter().position(|r| *r == tasks::TaskRow::Task(t)) {
             self.tasks.cursor = pos;
         }
@@ -840,10 +964,7 @@ impl App {
             return;
         }
         if let Some(t) = self.selected_task() {
-            self.prompt = Some(Prompt::Input {
-                kind: InputKind::EditTask { id: t.id.clone() },
-                buffer: t.title.clone(),
-            });
+            self.prompt = Some(Prompt::EditTask(TaskForm::new(t)));
         }
     }
 
@@ -875,6 +996,33 @@ impl App {
                     buffer.pop();
                 }
                 KeyCode::Enter => self.submit_prompt(),
+                _ => {}
+            },
+            Some(Prompt::EditTask(form)) => match key.code {
+                KeyCode::Esc => self.prompt = None,
+                KeyCode::Enter => self.submit_prompt(),
+                KeyCode::Tab | KeyCode::Down => form.field = form.field.step(1),
+                KeyCode::BackTab | KeyCode::Up => form.field = form.field.step(-1),
+                KeyCode::Char(c) if form.field.typed() => {
+                    match form.field {
+                        TaskField::Title => form.title.push(c),
+                        _ => form.due.push(c),
+                    }
+                    form.error = None;
+                }
+                KeyCode::Backspace if form.field.typed() => {
+                    match form.field {
+                        TaskField::Title => form.title.pop(),
+                        _ => form.due.pop(),
+                    };
+                    form.error = None;
+                }
+                // Campos de escolha: circulam com Espaço ou setas laterais.
+                KeyCode::Char(' ') | KeyCode::Right | KeyCode::Left => match form.field {
+                    TaskField::Recur => form.recur = form.recur.next(),
+                    TaskField::Priority => form.priority = form.priority.next(),
+                    _ => {}
+                },
                 _ => {}
             },
             Some(Prompt::ConfirmDelete { .. })
@@ -913,7 +1061,6 @@ impl App {
                 }
                 match kind {
                     InputKind::AddTask => WorkerCmd::TaskAdd(title),
-                    InputKind::EditTask { id } => WorkerCmd::TaskEdit { id, title },
                     InputKind::EditSubtask { task_id, item_id } => {
                         WorkerCmd::SubTaskEdit {
                             task_id,
@@ -926,6 +1073,20 @@ impl App {
                         // ficaria escondida numa tarefa recolhida.
                         self.tasks_expanded.insert(task_id.clone());
                         WorkerCmd::SubTaskAdd { task_id, title }
+                    }
+                }
+            }
+            Some(Prompt::EditTask(form)) => {
+                match form.edit(self.now.date_naive()) {
+                    Ok(edit) => WorkerCmd::TaskUpdate { id: form.id, edit },
+                    Err(e) => {
+                        // Data ilegível: o formulário volta com o motivo em vez
+                        // de fechar engolindo o que foi digitado.
+                        let mut form = form;
+                        form.field = TaskField::Due;
+                        form.error = Some(e);
+                        self.prompt = Some(Prompt::EditTask(form));
+                        return;
                     }
                 }
             }
@@ -1067,7 +1228,12 @@ impl Model for App {
             Msg::PullsLoaded(res) => self.pulls.set(res),
             Msg::JiraLoaded(res) => self.jira.set(res),
             Msg::JiraMentions(res) => self.jira_mentions.set(res),
-            Msg::TasksLoaded(res) => self.tasks.set(res),
+            Msg::TasksLoaded(res) => {
+                self.tasks.set(res);
+                // As faixas mudam com a lista (uma data virou ontem): o cursor
+                // pode ter ficado num cabeçalho.
+                self.move_task_cursor(0);
+            }
             Msg::FoldersLoaded(account, res) => {
                 match res {
                     Ok(names) => {
@@ -1213,7 +1379,7 @@ mod tests {
         assert!(!app.tasks_expanded.contains("T1"), "Enter de novo recolhe");
 
         // Cursor na segunda tarefa, que não tem etapas: nada acontece.
-        app.tasks.cursor = 1;
+        go_to_task(&mut app, 1);
         app.update(key(KeyCode::Enter));
         assert!(app.tasks_expanded.is_empty());
     }
@@ -1224,10 +1390,11 @@ mod tests {
         // pelo cursor na própria tarefa tem de voltar o cursor para ela.
         let (mut app, _rx) = task_app(vec![task_with_subs("T1"), task("T2", "outra", false)]);
         app.update(key(KeyCode::Enter)); // expande T1, cursor volta para a linha de T1
-        assert_eq!(app.tasks.cursor, 0);
-        app.tasks.cursor = 3; // linha de T2 (T1, S1, S2, T2)
+        assert_eq!(app.tasks.cursor, row_of_task(&app, 0));
+        go_to_task(&mut app, 1); // linha de T2, depois das etapas de T1
+        let at_t2 = app.tasks.cursor;
         app.update(key(KeyCode::Enter)); // T2 não tem etapas: nada muda
-        assert_eq!(app.tasks.cursor, 3);
+        assert_eq!(app.tasks.cursor, at_t2);
     }
 
     #[test]
@@ -1236,14 +1403,19 @@ mod tests {
         // número de tarefas (1), as etapas seriam inalcançáveis por `j`.
         let (mut app, _rx) = task_app(vec![task_with_subs("T1")]);
         app.update(key(KeyCode::Enter)); // expande
+        let first = row_of_task(&app, 0);
         app.update(key(KeyCode::Char('j')));
-        assert_eq!(app.tasks.cursor, 1);
+        assert_eq!(app.tasks.cursor, first + 1);
         app.update(key(KeyCode::Char('j')));
-        assert_eq!(app.tasks.cursor, 2, "chega na última etapa");
+        assert_eq!(app.tasks.cursor, first + 2, "chega na última etapa");
         app.update(key(KeyCode::Char('j')));
-        assert_eq!(app.tasks.cursor, 2, "e não passa dela");
+        assert_eq!(app.tasks.cursor, first + 2, "e não passa dela");
         app.update(key(KeyCode::Char('G')));
-        assert_eq!(app.tasks.cursor, 2, "G vai para a última linha, não a última tarefa");
+        assert_eq!(
+            app.tasks.cursor,
+            first + 2,
+            "G vai para a última linha, não a última tarefa"
+        );
     }
 
     #[test]
@@ -1280,7 +1452,7 @@ mod tests {
     #[test]
     fn shift_a_on_a_subtask_row_creates_a_sibling_in_the_parent() {
         let (mut app, rx) = task_app(vec![task("t0", "outra", false), task_with_subs("t1")]);
-        app.tasks.cursor = 1; // t1
+        go_to_task(&mut app, 1); // t1
         app.update(key(KeyCode::Enter)); // expande
         app.update(key(KeyCode::Char('j'))); // primeira subtarefa de t1
         app.update(key(KeyCode::Char('A')));
@@ -1348,7 +1520,7 @@ mod tests {
     fn space_on_a_subtask_row_toggles_the_subtask_not_the_task() {
         let (mut app, rx) = task_app(vec![task_with_subs("T1")]);
         app.update(key(KeyCode::Enter)); // expande
-        app.tasks.cursor = 2; // segunda subtarefa, ainda não concluída
+        app.tasks.cursor = row_of_task(&app, 0) + 2; // segunda etapa, ainda não concluída
         app.update(key(KeyCode::Char(' ')));
         match rx.try_recv() {
             Ok(WorkerCmd::SubTaskToggle {
@@ -1974,9 +2146,29 @@ mod tests {
     fn task_app(items: Vec<TaskItem>) -> (App, mpsc::Receiver<WorkerCmd>) {
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(BubbleTheme::default(), tx);
-        app.tasks.set(Ok(items));
+        // Pelo caminho de verdade: é ele que assenta o cursor fora do cabeçalho
+        // da primeira faixa.
+        app.update(Msg::TasksLoaded(Ok(items)));
         app.focus = Panel::Tasks;
         (app, rx)
+    }
+
+    /// Põe o cursor na linha da tarefa de índice `t` (as linhas incluem os
+    /// cabeçalhos de faixa, então o índice da tarefa não é o da linha).
+    fn go_to_task(app: &mut App, t: usize) {
+        let rows = app.task_rows();
+        app.tasks.cursor = rows
+            .iter()
+            .position(|r| *r == tasks::TaskRow::Task(t))
+            .expect("a tarefa tem linha");
+    }
+
+    /// Linha em que a tarefa `t` está.
+    fn row_of_task(app: &App, t: usize) -> usize {
+        app.task_rows()
+            .iter()
+            .position(|r| *r == tasks::TaskRow::Task(t))
+            .expect("a tarefa tem linha")
     }
 
     fn task(id: &str, title: &str, completed: bool) -> TaskItem {
@@ -1987,6 +2179,8 @@ mod tests {
             subtasks: Vec::new(),
             due: String::new(),
             notes: String::new(),
+            priority: tasks::Priority::Normal,
+            recur: tasks::Recur::None,
         }
     }
 
@@ -2044,21 +2238,127 @@ mod tests {
     }
 
     #[test]
-    fn edit_prompt_prefills_title_and_submits_edit() {
-        let (mut app, rx) = task_app(vec![task("t9", "antigo", false)]);
+    fn g_and_shift_g_land_on_actionable_lines_not_on_a_header() {
+        let (mut app, rx) = task_app(vec![task("t1", "primeira", false), task("t2", "outra", false)]);
+        app.update(key(KeyCode::Char('g')));
+        assert_eq!(app.tasks.cursor, row_of_task(&app, 0), "g pula o cabeçalho");
+        app.update(key(KeyCode::Char(' ')));
+        assert!(rx.try_recv().is_ok(), "e a linha responde a Espaço");
+
+        app.update(key(KeyCode::Char('G')));
+        assert_eq!(app.tasks.cursor, row_of_task(&app, 1));
+        app.update(key(KeyCode::Char(' ')));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn the_edit_form_opens_filled_with_what_the_task_has() {
+        let mut t9 = task("t9", "antigo", false);
+        t9.due = "2026-08-20".into();
+        t9.recur = tasks::Recur::Weekly;
+        t9.priority = tasks::Priority::High;
+        let (mut app, _rx) = task_app(vec![t9]);
+
         app.update(key(KeyCode::Char('e')));
         match &app.prompt {
-            Some(Prompt::Input { buffer, .. }) => assert_eq!(buffer, "antigo"),
-            _ => panic!("esperava prompt de edição preenchido"),
+            Some(Prompt::EditTask(form)) => {
+                assert_eq!(form.title, "antigo");
+                assert_eq!(form.due, "2026-08-20");
+                assert_eq!(form.recur, tasks::Recur::Weekly);
+                assert_eq!(form.priority, tasks::Priority::High);
+                assert_eq!(form.field, TaskField::Title, "começa no título");
+            }
+            _ => panic!("esperava o formulário de edição"),
         }
-        app.update(key(KeyCode::Char('!')));
+    }
+
+    #[test]
+    fn the_form_writes_only_the_fields_that_changed() {
+        let mut t9 = task("t9", "antigo", false);
+        t9.due = "2026-08-20".into();
+        let (mut app, rx) = task_app(vec![t9]);
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::Char('!'))); // título: "antigo!"
+        app.update(key(KeyCode::Tab)); // vencimento
+        app.update(key(KeyCode::Tab)); // repetição
+        app.update(key(KeyCode::Char(' '))); // nenhuma -> diária
+        app.update(key(KeyCode::Enter));
+
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskUpdate { id, edit } => {
+                assert_eq!(id, "t9");
+                assert_eq!(edit.title.as_deref(), Some("antigo!"));
+                assert_eq!(edit.recur, Some(tasks::Recur::Daily));
+                assert_eq!(edit.due, None, "a data não foi tocada");
+                assert_eq!(edit.priority, None, "nem a prioridade");
+            }
+            _ => panic!("esperava TaskUpdate"),
+        }
+        assert!(app.prompt.is_none(), "o formulário fecha ao salvar");
+    }
+
+    #[test]
+    fn the_due_field_understands_shortcuts_and_clearing() {
+        let mut t9 = task("t9", "antigo", false);
+        t9.due = "2026-08-20".into();
+        let (mut app, rx) = task_app(vec![t9]);
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::Tab)); // vencimento
+        for _ in 0..10 {
+            app.update(key(KeyCode::Backspace)); // apaga a data inteira
+        }
+        for c in "hoje".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        let hoje = app.now.date_naive().format("%Y-%m-%d").to_string();
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskUpdate { edit, .. } => assert_eq!(edit.due, Some(hoje)),
+            _ => panic!("esperava TaskUpdate"),
+        }
+    }
+
+    #[test]
+    fn a_date_that_makes_no_sense_keeps_the_form_open_with_the_reason() {
+        let (mut app, rx) = task_app(vec![task("t9", "antigo", false)]);
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::Tab)); // vencimento
+        for c in "sexta".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+
+        match &app.prompt {
+            Some(Prompt::EditTask(form)) => {
+                assert_eq!(form.field, TaskField::Due, "o foco vai para o campo errado");
+                assert!(form.error.is_some(), "e o motivo aparece");
+                assert_eq!(form.due, "sexta", "sem engolir o que foi digitado");
+            }
+            _ => panic!("o formulário tinha de continuar aberto"),
+        }
+        assert!(rx.try_recv().is_err(), "nada é gravado");
+
+        // Corrigir o campo limpa o erro.
+        app.update(key(KeyCode::Backspace));
+        match &app.prompt {
+            Some(Prompt::EditTask(form)) => assert!(form.error.is_none()),
+            _ => panic!("formulário aberto"),
+        }
+    }
+
+    #[test]
+    fn confirming_the_form_without_changing_anything_writes_nothing() {
+        let (mut app, rx) = task_app(vec![task("t9", "antigo", false)]);
+        app.update(key(KeyCode::Char('e')));
         app.update(key(KeyCode::Enter));
         match rx.try_recv().unwrap() {
-            WorkerCmd::TaskEdit { id, title } => {
-                assert_eq!(id, "t9");
-                assert_eq!(title, "antigo!");
-            }
-            _ => panic!("esperava TaskEdit"),
+            WorkerCmd::TaskUpdate { edit, .. } => assert!(
+                edit.is_empty(),
+                "nada mudou, então o helper nem é chamado (update devolve Ok)"
+            ),
+            _ => panic!("esperava TaskUpdate"),
         }
     }
 

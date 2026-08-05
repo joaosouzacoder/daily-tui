@@ -8,7 +8,7 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui_bubbletea_theme::BubbleTheme;
 
 use crate::ansi;
-use crate::app::{App, InputKind, Panel, Prompt};
+use crate::app::{App, InputKind, Panel, Prompt, TaskField, TaskForm};
 use crate::clock;
 use chrono::Datelike;
 use crate::data::jira::{self, JiraItem};
@@ -312,13 +312,20 @@ fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
     // O cursor indexa linhas, e uma linha é uma tarefa ou uma subtarefa de uma
     // tarefa expandida — por isso o achatamento vem antes da renderização.
-    let rows = tasks::rows(&p.items, &app.tasks_expanded);
+    let rows = app.task_rows();
     let selected = focused.then_some(p.cursor);
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .map(|(row, kind)| {
             let line = match kind {
+                tasks::TaskRow::Header(group) => {
+                    // Mesmo tratamento do cabeçalho de projeto no Jira.
+                    return Line::from(Span::styled(
+                        group.label(),
+                        theme.accent.add_modifier(Modifier::BOLD),
+                    ));
+                }
                 tasks::TaskRow::Task(t) => {
                     let item = &p.items[*t];
                     task_line(item, theme, app.tasks_expanded.contains(&item.id), avail)
@@ -355,8 +362,15 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) ->
     } else {
         "▸ "
     };
-    // "  [x] " ocupa 6 colunas; o prazo, quando existe, mais 7 ("  dd/mm").
-    let title_w = room_for(avail, 6 + if t.due.is_empty() { 0 } else { 7 });
+    // "  [x] " ocupa 6 colunas; o prazo, quando existe, mais 7 ("  dd/mm"); a
+    // prioridade fora do normal mais 2, e a repetição outros 2.
+    let priority_w = if t.priority == tasks::Priority::Normal { 0 } else { 2 };
+    let title_w = room_for(
+        avail,
+        6 + priority_w
+            + if t.due.is_empty() { 0 } else { 7 }
+            + t.recur.marker().chars().count(),
+    );
     let mut spans = if t.completed {
         vec![
             theme.muted(mark),
@@ -370,9 +384,18 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) ->
             theme.span(clip(&t.title, title_w)),
         ]
     };
+    // Prioridade e repetição ficam colados no prazo, à direita: é o bloco que
+    // responde "isso é urgente?" de uma olhada só.
+    if priority_w > 0 {
+        spans.push(theme.span(" "));
+        spans.push(theme.accent(t.priority.marker()));
+    }
     if !t.due.is_empty() {
         spans.push(theme.muted("  "));
         spans.push(theme.accent(short_date(&t.due)));
+    }
+    if !t.recur.marker().is_empty() {
+        spans.push(theme.muted(t.recur.marker()));
     }
     Line::from(spans)
 }
@@ -455,6 +478,58 @@ fn subtask_line(s: &SubTask, theme: &BubbleTheme, avail: usize) -> Line<'static>
 }
 
 /// Overlay do prompt de tarefa (entrada de texto ou confirmação de exclusão).
+/// Campos do formulário de tarefa, na ordem em que aparecem.
+const TASK_FIELDS: [TaskField; 4] = [
+    TaskField::Title,
+    TaskField::Due,
+    TaskField::Recur,
+    TaskField::Priority,
+];
+
+/// Uma linha do formulário: rótulo, valor e a marca de qual campo está ativo.
+///
+/// Campo de texto mostra o cursor (`█`); campo de escolha mostra `‹ valor ›`,
+/// que é o que diz "aqui se circula em vez de digitar".
+fn form_field_line(form: &TaskForm, field: TaskField, theme: &BubbleTheme) -> Line<'static> {
+    let active = form.field == field;
+    let mut spans = vec![
+        if active {
+            theme.accent("▸ ")
+        } else {
+            theme.span("  ")
+        },
+        theme.muted(format!("{:<12}", field.label())),
+    ];
+    match field {
+        TaskField::Title | TaskField::Due => {
+            let value = if field == TaskField::Title {
+                form.title.clone()
+            } else {
+                form.due.clone()
+            };
+            spans.push(theme.span(value));
+            if active {
+                spans.push(theme.accent("█"));
+            }
+            if field == TaskField::Due && form.due.trim().is_empty() {
+                spans.push(theme.muted("  (vazio = sem data; hoje, amanhã, +3d)"));
+            }
+        }
+        TaskField::Recur => spans.push(choice(form.recur.label(), active, theme)),
+        TaskField::Priority => spans.push(choice(form.priority.label(), active, theme)),
+    }
+    Line::from(spans)
+}
+
+/// Valor de um campo de escolha, com as setas quando ele está ativo.
+fn choice(label: &str, active: bool, theme: &BubbleTheme) -> Span<'static> {
+    if active {
+        theme.accent(format!("‹ {label} ›"))
+    } else {
+        theme.span(format!("  {label}  "))
+    }
+}
+
 fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let Some(prompt) = &app.prompt else { return };
@@ -463,13 +538,26 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
         Prompt::Input { kind, buffer } => {
             let title = match kind {
                 InputKind::AddTask => " Nova tarefa ".to_string(),
-                InputKind::EditTask { .. } => " Editar tarefa ".to_string(),
                 InputKind::AddSubtask { .. } => " Nova subtarefa ".to_string(),
                 InputKind::EditSubtask { .. } => " Editar subtarefa ".to_string(),
             };
             let input = Line::from(vec![theme.span(buffer.clone()), theme.accent("█")]);
             let help = Line::from(theme.muted("Enter: salvar · Esc: cancelar"));
             (title, vec![input, Line::from(""), help])
+        }
+        Prompt::EditTask(form) => {
+            let mut lines: Vec<Line> = TASK_FIELDS
+                .iter()
+                .map(|f| form_field_line(form, *f, theme))
+                .collect();
+            lines.push(Line::from(""));
+            lines.push(match &form.error {
+                Some(e) => Line::from(theme.error(e.clone())),
+                None => Line::from(theme.muted(
+                    "Tab: campo · Espaço/←→: escolher · Enter: salvar · Esc: cancelar",
+                )),
+            });
+            (" Editar tarefa ".to_string(), lines)
         }
         Prompt::ConfirmDelete { title, .. } => (
             " Apagar tarefa ".to_string(),
@@ -550,7 +638,12 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
 
     // O seletor de pasta tem 10 linhas (título, seis pastas, espaçamento, ajuda);
     // os outros prompts cabem em 24% da tela.
-    let height = if matches!(prompt, Prompt::PickFolder { .. }) { 46 } else { 24 };
+    let height = match prompt {
+        Prompt::PickFolder { .. } => 46,
+        // Quatro campos, espaçamento e a linha de ajuda/erro.
+        Prompt::EditTask(_) => 34,
+        _ => 24,
+    };
     let popup = centered_rect(60, height, area);
     frame.render_widget(Clear, popup);
     let block = theme.titled_modal_block(title);
@@ -1203,12 +1296,26 @@ mod tests {
         assert!(out.contains("ENG-101"), "a lista não pode sumir atrás do erro");
     }
 
+    /// Tarefa mínima para os testes de render.
+    fn task_fixture(id: &str, title: &str) -> TaskItem {
+        TaskItem {
+            id: id.into(),
+            title: title.into(),
+            completed: false,
+            due: String::new(),
+            notes: String::new(),
+            subtasks: Vec::new(),
+            priority: Default::default(),
+            recur: Default::default(),
+        }
+    }
+
     #[test]
     fn tasks_panel_renders_checkbox_and_titles() {
         let mut app = test_app();
         app.tasks.items = vec![
-            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new(), subtasks: Vec::new() },
-            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new(), subtasks: Vec::new() },
+            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new(), subtasks: Vec::new(), priority: Default::default(), recur: Default::default() },
+            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new(), subtasks: Vec::new(), priority: Default::default(), recur: Default::default() },
         ];
         app.tasks.loaded = true;
         let out = render_to_string(&app, 120, 30);
@@ -1216,6 +1323,55 @@ mod tests {
         assert!(out.contains("[ ] Comprar café"));
         assert!(out.contains("[x] Já feito"));
         assert!(out.contains("10/06")); // prazo formatado
+    }
+
+    #[test]
+    fn the_tasks_panel_groups_by_deadline_and_marks_priority() {
+        let today = chrono::Local::now().date_naive();
+        let mut app = test_app();
+        let mut atrasada = task_fixture("1", "Orçar o serviço");
+        atrasada.due = (today - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut hoje = task_fixture("2", "Revisar o plano");
+        hoje.due = today.format("%Y-%m-%d").to_string();
+        hoje.priority = tasks::Priority::High;
+        hoje.recur = tasks::Recur::Weekly;
+        let sem_data = task_fixture("3", "Ler o artigo salvo");
+        app.tasks.items = vec![atrasada, hoje, sem_data];
+        app.tasks.loaded = true;
+
+        let out = render_to_string(&app, 120, 40);
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("falta {needle}"));
+        assert!(at("ATRASADAS") < at("HOJE"), "atrasadas vêm primeiro");
+        assert!(at("HOJE") < at("SEM DATA"), "sem data vai para o fim");
+        assert!(!out.contains("ESTA SEMANA"), "faixa vazia não vira cabeçalho");
+        assert!(out.contains("!"), "prioridade alta marca a linha");
+        assert!(out.contains("↻"), "e a repetição também");
+    }
+
+    #[test]
+    fn the_edit_form_shows_every_field_with_the_active_one_marked() {
+        let mut app = test_app();
+        let mut t = task_fixture("1", "Revisar o plano");
+        t.due = "2026-08-07".into();
+        t.recur = tasks::Recur::Weekly;
+        t.priority = tasks::Priority::High;
+        // Pelo caminho real: é ele que deixa o cursor numa linha de tarefa.
+        app.update(crate::msg::Msg::TasksLoaded(Ok(vec![t])));
+        app.focus = Panel::Tasks;
+        app.update(crate::msg::Msg::Key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('e'),
+            ratatui::crossterm::event::KeyModifiers::empty(),
+        )));
+
+        let out = render_to_string(&app, 120, 40);
+        assert!(out.contains("Editar tarefa"));
+        assert!(out.contains("Revisar o plano"));
+        assert!(out.contains("2026-08-07"));
+        assert!(out.contains("semanal"), "repetição pelo nome");
+        assert!(out.contains("alta"), "prioridade pelo nome");
+        assert!(out.contains("Tab"), "e como andar entre os campos");
     }
 
     #[test]

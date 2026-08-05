@@ -54,7 +54,8 @@ pub enum WorkerCmd {
     TaskComplete(String),
     TaskReopen(String),
     TaskAdd(String),
-    TaskEdit { id: String, title: String },
+    /// Grava título/vencimento/repetição/prioridade de uma tarefa.
+    TaskUpdate { id: String, edit: tasks::TaskEdit },
     TaskDelete(String),
     /// Cria uma subtarefa na tarefa dada.
     SubTaskAdd { task_id: String, title: String },
@@ -135,8 +136,8 @@ pub fn spawn(
                 Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
                 Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),
                 Ok(WorkerCmd::TaskAdd(title)) => mutate_tasks(&ui, tasks::add(&title)),
-                Ok(WorkerCmd::TaskEdit { id, title }) => {
-                    mutate_tasks(&ui, tasks::edit(&id, &title))
+                Ok(WorkerCmd::TaskUpdate { id, edit }) => {
+                    mutate_tasks(&ui, tasks::update(&id, &edit))
                 }
                 Ok(WorkerCmd::TaskDelete(id)) => mutate_tasks(&ui, tasks::delete(&id)),
                 Ok(WorkerCmd::SubTaskAdd { task_id, title }) => {

@@ -443,6 +443,31 @@ No painel **Tarefas**: `Espaço` conclui/reabre · `a` cria · `A` cria subtaref
 `e` edita · `d` apaga (confirma com `y`/`n`) · `Enter` expande/recolhe as
 subtarefas.
 
+A lista é agrupada por prazo — **ATRASADAS**, **HOJE**, **ESTA SEMANA**,
+**ESTE MÊS**, **DEPOIS**, **SEM DATA** —, e é essa a ordem de prioridade: o que
+passou da data primeiro, o que não tem data no fim. As janelas são móveis (7 e 30
+dias a partir de hoje), não o calendário: numa sexta, "esta semana" pelo
+calendário mostraria dois dias e jogaria o resto para o mês. Faixa vazia não
+aparece, e o cursor pula os cabeçalhos.
+
+Prioridade alta marca a linha com `!` (baixa com `↓`, normal não marca nada) e
+tarefa que repete ganha `↻` ao lado do prazo.
+
+`e` numa tarefa abre um formulário com os quatro campos de uma vez — título,
+vencimento, repetição e prioridade. `Tab`/`Shift+Tab` (ou `↑`/`↓`) andam pelos
+campos, texto se digita, e `Espaço`/`←`/`→` circulam repetição
+(nenhuma → diária → semanal → mensal) e prioridade (normal → alta → baixa).
+`Enter` grava tudo numa chamada só; `Esc` cancela.
+
+No campo de vencimento vale `AAAA-MM-DD`, `hoje`, `amanhã` e `+3d`; **vazio
+limpa a data**. Data que não dá para entender não fecha o formulário — ele volta
+com o motivo no lugar da linha de ajuda, sem perder o que você digitou.
+
+> Repetição exige data: o Graph recusa recorrência sem vencimento e pede a data
+> no mesmo pedido, então o formulário manda as duas juntas. Uma tarefa que repete
+> de um jeito que este painel não oferece (criada no app do To Do) aparece como
+> `outra (do app)` — dá para tirar a repetição, não para reproduzi-la.
+
 `A` cria a subtarefa na tarefa da linha onde você está — inclusive quando o
 cursor já está sobre uma subtarefa, aí a nova entra como irmã dela. A mãe abre
 sozinha, senão a subtarefa nova chegaria escondida numa tarefa recolhida.
