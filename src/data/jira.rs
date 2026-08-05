@@ -24,6 +24,24 @@ pub struct JiraItem {
     /// Nome do tipo como o Jira o chama (`História`, `Epic`, `Iniciativa`…).
     #[serde(default, rename = "type")]
     pub kind: String,
+    /// `true` quando o Jira classifica o tipo como subtarefa. Vem de um campo
+    /// próprio da API, e não do nome — cada instância batiza o tipo como quer.
+    #[serde(default)]
+    pub subtask: bool,
+}
+
+impl JiraItem {
+    /// Marcador de tipo desta issue.
+    ///
+    /// Subtarefa tem o seu (`[s]`, minúsculo ao lado do `[S]` de história):
+    /// o nome do tipo varia por instância, mas a API diz quem é subtarefa.
+    pub fn type_marker(&self) -> &'static str {
+        if self.subtask {
+            "[s]"
+        } else {
+            type_marker(&self.kind)
+        }
+    }
 }
 
 /// Marcador de uma letra para o tipo da issue.
@@ -69,17 +87,6 @@ pub enum JiraRole {
     Assignee,
     Reporter,
     Both,
-}
-
-impl JiraRole {
-    /// Marcador curto, no idioma dos `[W]`/`[P]` do e-mail e da agenda.
-    pub const fn marker(self) -> &'static str {
-        match self {
-            JiraRole::Assignee => "[A]",
-            JiraRole::Reporter => "[R]",
-            JiraRole::Both => "[AR]",
-        }
-    }
 }
 
 /// Modo de filtro do painel; circulado pela tecla `f`.
@@ -140,7 +147,8 @@ pub fn parse_issues(raw: &str) -> Result<Vec<JiraItem>, String> {
 pub fn rows_by_project(items: &[JiraItem]) -> Vec<JiraRow> {
     let mut rows = Vec::new();
     let mut current: Option<&str> = None;
-    for (i, item) in items.iter().enumerate() {
+    for i in project_order(items) {
+        let item = &items[i];
         if current != Some(item.project.as_str()) {
             rows.push(JiraRow::Header(item.project.clone()));
             current = Some(item.project.as_str());
@@ -148,6 +156,66 @@ pub fn rows_by_project(items: &[JiraItem]) -> Vec<JiraRow> {
         rows.push(JiraRow::Issue(i));
     }
     rows
+}
+
+/// Ordem das issues no agrupamento por projeto: a do helper, com cada subtarefa
+/// puxada para logo depois do pai.
+///
+/// Indentar uma subtarefa longe do pai é pior do que não indentar: a linha fica
+/// deslocada sob quem não é dela. Subtarefa cujo pai não está na lista fica onde
+/// estava, sem indentação (ver `is_nested`).
+fn project_order(items: &[JiraItem]) -> Vec<usize> {
+    /// Filhas diretas de `parent`, na ordem em que o helper as devolveu.
+    fn children_of(items: &[JiraItem], parent: &str) -> Vec<usize> {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                i.subtask && i.parent.as_ref().map(|p| p.key.as_str()) == Some(parent)
+            })
+            .map(|(k, _)| k)
+            .collect()
+    }
+
+    let mut out = Vec::with_capacity(items.len());
+    let mut done = vec![false; items.len()];
+    for (i, item) in items.iter().enumerate() {
+        // Subtarefa com o pai na lista não entra aqui: ela é emitida logo depois
+        // dele, quando chegar a vez do pai.
+        if done[i] || is_nested(items, i) {
+            continue;
+        }
+        out.push(i);
+        done[i] = true;
+        for k in children_of(items, &item.key) {
+            if !done[k] {
+                out.push(k);
+                done[k] = true;
+            }
+        }
+    }
+    // Rede de segurança: subtarefa cujo pai existe na lista mas não foi emitido
+    // (subtarefa de subtarefa, dado circular) não pode desaparecer da tela.
+    out.extend(
+        done.iter()
+            .enumerate()
+            .filter(|(_, emitted)| !**emitted)
+            .map(|(i, _)| i),
+    );
+    out
+}
+
+/// `true` quando a linha desta issue deve ser indentada: é subtarefa **e** o pai
+/// está na lista, logo acima dela.
+pub fn is_nested(items: &[JiraItem], index: usize) -> bool {
+    let item = &items[index];
+    if !item.subtask {
+        return false;
+    }
+    let Some(parent) = item.parent.as_ref() else {
+        return false;
+    };
+    items.iter().any(|i| i.key == parent.key)
 }
 
 /// Índice da linha que mostra a issue `item`; 0 quando não estiver nas linhas.
@@ -377,6 +445,91 @@ mod tests {
         assert_eq!(browser_program(), expected);
     }
 
+    // Forma do que o helper devolve numa hierarquia de verdade — iniciativa,
+    // épico, história e a subtarefa dela — com conteúdo inventado.
+    const TREE: &str = r#"[
+      {"key":"ENG-1","summary":"Plataforma","status":"Em andamento","project":"ENG",
+       "url":"u","type":"Iniciativa","parent":null,"subtask":false,"role":"assignee"},
+      {"key":"ENG-9","summary":"Ajustar o import","status":"Em andamento","project":"ENG",
+       "url":"u","type":"Subtarefa","subtask":true,"role":"both",
+       "parent":{"key":"ENG-7","summary":"Importar planilha"}},
+      {"key":"ENG-7","summary":"Importar planilha","status":"Em andamento","project":"ENG",
+       "url":"u","type":"História","subtask":false,"role":"reporter",
+       "parent":{"key":"ENG-1","summary":"Plataforma"}}
+    ]"#;
+
+    #[test]
+    fn a_subtask_gets_its_own_marker_instead_of_the_unknown_one() {
+        // "Subtarefa" não está no mapa de nomes, e cairia em `[?]`; quem diz que
+        // é subtarefa é o campo próprio da API.
+        let items = parse_issues(TREE).unwrap();
+        assert_eq!(items[1].kind, "Subtarefa");
+        assert_eq!(type_marker(&items[1].kind), "[?]", "pelo nome, seria desconhecida");
+        assert_eq!(items[1].type_marker(), "[s]", "mas o campo `subtask` resolve");
+        assert_eq!(items[2].type_marker(), "[S]", "história segue com o dela");
+    }
+
+    #[test]
+    fn a_subtask_is_pulled_under_its_parent() {
+        // O helper devolve por data de atualização, então a subtarefa vinha
+        // antes do pai. Indentar longe do pai é pior do que não indentar.
+        let items = parse_issues(TREE).unwrap();
+        let keys: Vec<&str> = rows_by_project(&items)
+            .into_iter()
+            .filter_map(|r| match r {
+                JiraRow::Issue(i) => Some(items[i].key.as_str()),
+                JiraRow::Header(_) => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["ENG-1", "ENG-7", "ENG-9"], "a subtarefa segue ENG-7");
+        assert_eq!(keys.len(), items.len(), "nada duplicado nem perdido");
+    }
+
+    #[test]
+    fn a_subtask_of_a_subtask_still_shows_up() {
+        // Reordenar não pode custar uma linha: se a cadeia de pais não fecha, a
+        // issue entra no fim em vez de desaparecer.
+        let raw = r#"[
+          {"key":"A-1","summary":"neta","status":"x","project":"A","url":"u",
+           "type":"Subtarefa","subtask":true,"parent":{"key":"A-2","summary":"filha"}},
+          {"key":"A-2","summary":"filha","status":"x","project":"A","url":"u",
+           "type":"Subtarefa","subtask":true,"parent":{"key":"A-3","summary":"pai"}}
+        ]"#;
+        let items = parse_issues(raw).unwrap();
+        let shown: Vec<&str> = rows_by_project(&items)
+            .into_iter()
+            .filter_map(|r| match r {
+                JiraRow::Issue(i) => Some(items[i].key.as_str()),
+                JiraRow::Header(_) => None,
+            })
+            .collect();
+        assert_eq!(shown.len(), 2, "as duas aparecem: {shown:?}");
+    }
+
+    #[test]
+    fn only_a_subtask_whose_parent_is_listed_gets_indented() {
+        let items = parse_issues(TREE).unwrap();
+        assert!(!is_nested(&items, 0), "iniciativa não indenta");
+        assert!(!is_nested(&items, 2), "história com pai na lista também não");
+        assert!(is_nested(&items, 1), "subtarefa com o pai à vista, sim");
+
+        // Sozinha, sem o pai na lista, ela não é deslocada sob quem não é dela.
+        let orphan = parse_issues(
+            r#"[{"key":"ENG-9","summary":"s","status":"x","project":"ENG","url":"u",
+                 "type":"Subtarefa","subtask":true,
+                 "parent":{"key":"ENG-7","summary":"Importar planilha"}}]"#,
+        )
+        .unwrap();
+        assert!(!is_nested(&orphan, 0));
+    }
+
+    #[test]
+    fn an_issue_without_the_subtask_field_is_not_one() {
+        // JSON de um helper anterior não tem o campo.
+        let items = parse_issues(REAL).unwrap();
+        assert!(items.iter().all(|i| !i.subtask));
+    }
+
     #[test]
     fn invalid_json_is_an_error() {
         assert!(parse_issues("nope").is_err());
@@ -441,15 +594,12 @@ mod tests {
         let items = parse_issues(raw).unwrap();
         assert_eq!(items[0].role, JiraRole::Both);
         assert_eq!(items[1].role, JiraRole::Reporter);
-        assert_eq!(items[0].role.marker(), "[AR]");
-        assert_eq!(items[1].role.marker(), "[R]");
     }
 
     #[test]
     fn missing_role_defaults_to_assignee() {
         let items = parse_issues(r#"[{"key":"A-1","summary":"s","status":"","project":"A","url":"u","parent":null}]"#).unwrap();
         assert_eq!(items[0].role, JiraRole::Assignee);
-        assert_eq!(items[0].role.marker(), "[A]");
     }
 
     #[test]

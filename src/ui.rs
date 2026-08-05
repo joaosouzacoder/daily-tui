@@ -308,7 +308,12 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
             }
             jira::JiraRow::Issue(i) => {
                 let item = &p.items[*i];
-                highlight(issue_line(item, theme, show_role, avail), theme, selected == Some(*i))
+                let nested = jira::is_nested(&p.items, *i);
+                highlight(
+                    issue_line(item, theme, show_role, nested, avail),
+                    theme,
+                    selected == Some(*i),
+                )
             }
         })
         .collect();
@@ -330,31 +335,48 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
 ///
 /// `show_role` só é verdadeiro no filtro `ambas` fora da visão de menções —
 /// nos outros casos o papel não distingue nada, e mostrá-lo seria ruído.
-fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool, avail: usize) -> Line<'static> {
+fn issue_line(
+    item: &JiraItem,
+    theme: &BubbleTheme,
+    show_role: bool,
+    nested: bool,
+    avail: usize,
+) -> Line<'static> {
+    // Subtarefa entra deslocada, embaixo do pai — a indentação é o que diz que
+    // ela pertence à linha de cima em vez de disputar o mesmo nível.
+    let indent = if nested { "     " } else { "  " };
     // O tipo vem antes da chave: é o que diz se a linha é uma história do dia a
     // dia ou uma iniciativa acima dela, e lido em coluna se compara de relance.
-    let kind = jira::type_marker(&item.kind);
+    let kind = item.type_marker();
     let mut spans = vec![
-        theme.muted(format!("  {kind} ")),
+        theme.muted(format!("{indent}{kind} ")),
         theme.accent(item.key.clone()),
         theme.muted(format!(" [{}] ", item.status)),
     ];
-    // O marcador ("[AR] ") ocupa 5 colunas; o clip do resumo encurta na mesma
-    // medida para a linha não vazar do painel.
-    let role_w = if show_role {
-        spans.push(theme.muted(format!("{} ", item.role.marker())));
-        item.role.marker().chars().count() + 1
+    // No filtro `ambas`, marca só o que **não** é seu para fazer: sem marcador
+    // significa "é sua". Marcar as duas coisas dava três grupos de colchetes na
+    // mesma linha, todos esmaecidos — e nada saltava.
+    //
+    // `[rel]` e não `[R]`: `[R]` é o marcador de *tipo* de uma requisição, e as
+    // duas coisas apareceram na mesma linha em dado real, significando coisas
+    // diferentes com a mesma letra. Nenhum tipo tem três letras.
+    let role = if show_role && item.role == jira::JiraRole::Reporter {
+        // Em cor de erro, não em `muted`: é o único jeito de a exceção saltar
+        // numa linha que já tem tipo e status entre colchetes.
+        spans.push(theme.error("[rel] "));
+        6
     } else {
         0
     };
     let summary_width = room_for(
         avail,
-        2 + kind.chars().count()
+        indent.chars().count()
+            + kind.chars().count()
             + 1
             + item.key.chars().count()
             + item.status.chars().count()
             + 4
-            + role_w,
+            + role,
     );
     spans.push(theme.span(clip(&item.summary, summary_width)));
     Line::from(spans)
@@ -1171,6 +1193,98 @@ mod tests {
         let out = render_to_string(&app, 120, 30);
         assert!(out.contains("[S] ENG-101"), "história marcada com [S]");
         assert!(out.contains("[I] ENG-1"), "iniciativa marcada com [I]");
+    }
+
+    #[test]
+    fn in_the_both_filter_only_what_is_not_yours_is_marked() {
+        // A queixa era "nada me difere o que é meu do que eu só relatei".
+        // Marcar os dois lados dava três grupos de colchetes esmaecidos na
+        // mesma linha; agora sem marca significa "é sua".
+        let mut app = test_app();
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-1","summary":"minha","status":"Em andamento","project":"ENG",
+                 "url":"u","parent":null,"type":"História","role":"assignee"},
+                {"key":"ENG-2","summary":"só relatei","status":"Em andamento","project":"ENG",
+                 "url":"u","parent":null,"type":"História","role":"reporter"},
+                {"key":"ENG-3","summary":"as duas","status":"Em andamento","project":"ENG",
+                 "url":"u","parent":null,"type":"História","role":"both"}]"#,
+        )
+        .unwrap();
+        app.jira.loaded = true;
+        app.jira_filter = crate::data::jira::JiraFilter::Both;
+
+        let out = render_to_string(&app, 120, 30);
+        let line = |needle: &str| {
+            out.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("falta a linha de {needle}"))
+                .to_string()
+        };
+        assert!(line("ENG-2").contains("[rel]"), "só relator é marcado");
+        assert!(!line("ENG-1").contains("[rel]"), "a sua não leva marca");
+        assert!(!line("ENG-3").contains("[rel]"), "nem a que é sua e você relatou");
+    }
+
+    #[test]
+    fn the_role_marker_cannot_be_confused_with_the_request_type() {
+        // Visto em dado real: uma requisição relatada por mim saía
+        // "[R] PDS-1122 [Pendente] [R] …" — a mesma letra para tipo e papel.
+        let mut app = test_app();
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"PDS-1","summary":"pedido","status":"Pendente","project":"PDS",
+                 "url":"u","parent":null,"type":"[System] Service request","role":"reporter"}]"#,
+        )
+        .unwrap();
+        app.jira.loaded = true;
+        app.jira_filter = crate::data::jira::JiraFilter::Both;
+        let line = render_to_string(&app, 120, 30)
+            .lines()
+            .find(|l| l.contains("PDS-1"))
+            .expect("linha")
+            .to_string();
+        assert!(line.contains("[R] PDS-1"), "o tipo requisição segue sendo [R]");
+        assert!(line.contains("[rel]"), "e o papel tem marcador próprio");
+    }
+
+    #[test]
+    fn the_role_marker_stays_out_of_the_other_filters() {
+        let mut app = test_app();
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-2","summary":"s","status":"x","project":"ENG","url":"u",
+                 "parent":null,"type":"História","role":"reporter"}]"#,
+        )
+        .unwrap();
+        app.jira.loaded = true;
+        // Filtro `minhas`: toda issue tem o mesmo papel, e a marca seria ruído.
+        assert!(!render_to_string(&app, 120, 30).contains("[rel]"));
+    }
+
+    #[test]
+    fn a_subtask_is_drawn_indented_under_its_parent() {
+        let mut app = test_app();
+        app.jira.items = crate::data::jira::parse_issues(
+            r#"[{"key":"ENG-9","summary":"etapa","status":"Em andamento","project":"ENG",
+                 "url":"u","type":"Subtarefa","subtask":true,
+                 "parent":{"key":"ENG-7","summary":"história"}},
+                {"key":"ENG-7","summary":"história","status":"Em andamento","project":"ENG",
+                 "url":"u","type":"História","subtask":false,"parent":null}]"#,
+        )
+        .unwrap();
+        app.jira.loaded = true;
+
+        let out = render_to_string(&app, 120, 30);
+        let indent_of = |needle: &str| {
+            let line = out.lines().find(|l| l.contains(needle)).expect("linha");
+            let inner = line.trim_start_matches(['│', ' ']);
+            line.find(inner).unwrap_or(0)
+        };
+        assert!(out.contains("[s] ENG-9"), "subtarefa tem marcador próprio");
+        assert!(
+            indent_of("ENG-9") > indent_of("ENG-7"),
+            "e entra deslocada em relação ao pai"
+        );
+        let pos = |k: &str| out.find(k).unwrap();
+        assert!(pos("ENG-7") < pos("ENG-9"), "logo abaixo dele, não antes");
     }
 
     #[test]

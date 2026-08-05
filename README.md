@@ -594,7 +594,11 @@ de agenda para aceitar, menções no GitHub — sem mudar o overlay.
 
 Cada linha do painel de Jira abre com o tipo da issue: `[S]` história, `[E]`
 épico, `[I]` iniciativa, `[O]` objetivo, `[R]` requisição (o Pedido de Serviço,
-que a API devolve como `[System] Service request`). O nome do tipo vem no idioma
+que a API devolve como `[System] Service request`) e `[s]` subtarefa — essa vem
+do campo `subtask` da API, não do nome do tipo, porque cada instância batiza o
+tipo como quer. Subtarefa aparece **indentada, logo abaixo do pai**, quando o pai
+está na lista; quando não está, ela fica onde estava e sem indentação, para não
+sair deslocada sob quem não é dela. O nome do tipo vem no idioma
 da sua instância (a do autor responde `História`/`Iniciativa`), e os dois idiomas
 estão no mapa; tipo fora dele aparece como `[?]` em vez de virar uma letra
 chutada pela inicial — `Subtarefa` ficaria igual a história.
@@ -602,10 +606,10 @@ chutada pela inicial — `Subtarefa` ficaria igual a história.
 No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
 o filtro (`minhas` → `relator` → `ambas`) · `p` mostra as issues agrupadas por
 pai · `Esc` volta para a visão de issues. O rodapé mostra essas teclas sempre que
-o painel de Jira (ou o de Tarefas) está em foco. No filtro `ambas`, cada issue
-ganha um marcador esmaecido — `[A]` assignee, `[R]` reporter, `[AR]` os dois —
-porque só ali a pergunta "sou responsável ou apenas relator disto?" tem resposta
-ambígua.
+o painel de Jira (ou o de Tarefas) está em foco. No filtro `ambas`, o que **não** é
+seu para fazer ganha `[rel]` em destaque: sem marcador significa "é sua". Marcar
+os três papéis deixava três grupos de colchetes esmaecidos na mesma linha e nada
+saltava — e `[R]` não serve para o papel, porque `[R]` já é o *tipo* requisição.
 
 ---
 

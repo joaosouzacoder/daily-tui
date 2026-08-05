@@ -129,6 +129,9 @@ def to_item(issue, cloud, me):
         # idioma (na do autor: "História", "Iniciativa"). Quem traduz para o
         # marcador de uma letra é o painel.
         "type": ((fields.get("issuetype") or {}).get("name") or "").strip(),
+        # O proprio Jira marca quais tipos sao subtarefa. Vale mais que o nome:
+        # cada instancia batiza o tipo como quer ("Subtarefa", "Sub-task").
+        "subtask": bool((fields.get("issuetype") or {}).get("subtask")),
         "parent": None,
         "role": role_of(fields, me),
     }

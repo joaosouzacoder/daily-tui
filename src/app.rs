@@ -1889,6 +1889,7 @@ mod tests {
             parent: None,
             role: Default::default(),
             kind: "História".into(),
+            subtask: false,
         }
     }
 
