@@ -363,8 +363,13 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) ->
         "▸ "
     };
     // "  [x] " ocupa 6 colunas; o prazo, quando existe, mais 7 ("  dd/mm"); a
-    // prioridade fora do normal mais 2, e a repetição outros 2.
-    let priority_w = if t.priority == tasks::Priority::Normal { 0 } else { 2 };
+    // prioridade o tanto de `!` mais o espaço, e a repetição outros 2.
+    let priority = t.priority.marker();
+    let priority_w = if priority.is_empty() {
+        0
+    } else {
+        priority.chars().count() + 1
+    };
     let title_w = room_for(
         avail,
         6 + priority_w
@@ -386,9 +391,9 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) ->
     };
     // Prioridade e repetição ficam colados no prazo, à direita: é o bloco que
     // responde "isso é urgente?" de uma olhada só.
-    if priority_w > 0 {
+    if !priority.is_empty() {
         spans.push(theme.span(" "));
-        spans.push(theme.accent(t.priority.marker()));
+        spans.push(theme.accent(priority));
     }
     if !t.due.is_empty() {
         spans.push(theme.muted("  "));
@@ -1346,7 +1351,7 @@ mod tests {
         assert!(at("ATRASADAS") < at("HOJE"), "atrasadas vêm primeiro");
         assert!(at("HOJE") < at("SEM DATA"), "sem data vai para o fim");
         assert!(!out.contains("ESTA SEMANA"), "faixa vazia não vira cabeçalho");
-        assert!(out.contains("!"), "prioridade alta marca a linha");
+        assert!(out.contains("!!!"), "prioridade alta marca a linha com três");
         assert!(out.contains("↻"), "e a repetição também");
     }
 

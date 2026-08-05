@@ -450,13 +450,13 @@ dias a partir de hoje), não o calendário: numa sexta, "esta semana" pelo
 calendário mostraria dois dias e jogaria o resto para o mês. Faixa vazia não
 aparece, e o cursor pula os cabeçalhos.
 
-Prioridade alta marca a linha com `!` (baixa com `↓`, normal não marca nada) e
-tarefa que repete ganha `↻` ao lado do prazo.
+Prioridade marca a linha em escala: `!!!` alta, `!` média, e baixa sem marca
+nenhuma. Tarefa que repete ganha `↻` ao lado do prazo.
 
 `e` numa tarefa abre um formulário com os quatro campos de uma vez — título,
 vencimento, repetição e prioridade. `Tab`/`Shift+Tab` (ou `↑`/`↓`) andam pelos
 campos, texto se digita, e `Espaço`/`←`/`→` circulam repetição
-(nenhuma → diária → semanal → mensal) e prioridade (normal → alta → baixa).
+(nenhuma → diária → semanal → mensal) e prioridade (média → alta → baixa).
 `Enter` grava tudo numa chamada só; `Esc` cancela.
 
 No campo de vencimento vale `AAAA-MM-DD`, `hoje`, `amanhã` e `+3d`; **vazio

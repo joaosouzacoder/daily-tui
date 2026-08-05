@@ -38,20 +38,23 @@ impl Priority {
     }
 
     /// Nome no formulário de edição.
+    ///
+    /// O Graph só tem três níveis (`low`/`normal`/`high`); "média" é o nome do
+    /// do meio aqui, para casar com a escala de `!` da lista.
     pub const fn label(self) -> &'static str {
         match self {
             Priority::Low => "baixa",
-            Priority::Normal => "normal",
+            Priority::Normal => "média",
             Priority::High => "alta",
         }
     }
 
-    /// Marcador na lista. Normal não marca nada: o comum não merece tinta.
+    /// Marcador na lista, em escala: `!!!` alta, `!` média, nada para baixa.
     pub const fn marker(self) -> &'static str {
         match self {
-            Priority::Low => "↓",
-            Priority::Normal => " ",
-            Priority::High => "!",
+            Priority::Low => "",
+            Priority::Normal => "!",
+            Priority::High => "!!!",
         }
     }
 
@@ -556,7 +559,7 @@ mod tests {
         let t = &parse_tasks(raw).unwrap()[0];
         assert_eq!(t.priority, Priority::High);
         assert_eq!(t.recur, Recur::Monthly);
-        assert_eq!(t.priority.marker(), "!");
+        assert_eq!(t.priority.marker(), "!!!");
     }
 
     #[test]
@@ -576,6 +579,13 @@ mod tests {
         assert_eq!(t.priority, Priority::Normal);
         assert_eq!(t.recur, Recur::None);
         assert_eq!(t.recur.marker(), "", "sem repetição, sem marcador");
+    }
+
+    #[test]
+    fn the_priority_marker_is_a_scale_of_exclamation_marks() {
+        assert_eq!(Priority::High.marker(), "!!!");
+        assert_eq!(Priority::Normal.marker(), "!");
+        assert_eq!(Priority::Low.marker(), "", "baixa não pede atenção");
     }
 
     #[test]
