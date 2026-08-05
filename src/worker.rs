@@ -9,7 +9,7 @@ use ratatui_tea::ProgramHandle;
 
 use crate::data::jira::JiraFilter;
 use crate::data::{agenda, email, jira, pulls, tasks, Account};
-use crate::msg::Msg;
+use crate::msg::{EmailWriteKind, Msg};
 
 /// De quanto em quanto tempo relistar as pastas das contas.
 ///
@@ -117,15 +117,15 @@ pub fn spawn(
                 }
                 Ok(WorkerCmd::EmailSetSeen { items, seen }) => {
                     let done = each(&items, |account, id| email::set_seen(account, id, seen));
-                    mutate_emails(&ui, items, done);
+                    mutate_emails(&ui, EmailWriteKind::Seen, items, done);
                 }
                 Ok(WorkerCmd::EmailMove { items, folder }) => {
                     let done = each(&items, |account, id| email::move_to(account, id, &folder));
-                    mutate_emails(&ui, items, done);
+                    mutate_emails(&ui, EmailWriteKind::Gone, items, done);
                 }
                 Ok(WorkerCmd::EmailDelete { items }) => {
                     let done = each(&items, email::delete);
-                    mutate_emails(&ui, items, done);
+                    mutate_emails(&ui, EmailWriteKind::Gone, items, done);
                 }
                 Ok(WorkerCmd::TaskComplete(id)) => mutate_tasks(&ui, tasks::complete(&id)),
                 Ok(WorkerCmd::TaskReopen(id)) => mutate_tasks(&ui, tasks::reopen(&id)),
@@ -245,10 +245,12 @@ where
 /// erro viaja junto para o painel poder dizer o motivo.
 fn mutate_emails(
     ui: &ProgramHandle<Msg>,
+    kind: EmailWriteKind,
     targets: Vec<(Account, String)>,
     result: Result<(), String>,
 ) {
     let _ = ui.send(Msg::EmailWrite {
+        kind,
         targets,
         error: result.err(),
         list: fetch_emails(),

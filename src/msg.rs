@@ -5,6 +5,15 @@ use ratatui::crossterm::event::KeyEvent;
 use crate::data::jira::JiraItem;
 use crate::data::{AgendaItem, EmailItem, TaskItem};
 
+/// Que escrita de e-mail terminou.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmailWriteKind {
+    /// Marcar ou desmarcar como lido.
+    Seen,
+    /// Sair da pasta atual: mover ou excluir.
+    Gone,
+}
+
 /// Eventos processados pelo modelo. Precisa ser `Send + 'static` para
 /// trafegar do worker para o loop principal via `ratatui_tea::channel`.
 pub enum Msg {
@@ -26,11 +35,16 @@ pub enum Msg {
     TasksLoaded(Result<Vec<TaskItem>, String>),
     /// Pastas de uma conta, para o seletor de "mover" (inclui as etiquetas).
     FoldersLoaded(crate::data::Account, Result<Vec<String>, String>),
-    /// Fim de uma escrita de e-mail (lido, mover, excluir): os alvos, o erro
-    /// se houve, e a lista do servidor depois da escrita. Vem tudo junto porque
-    /// só quando o servidor responde é que a lista dele passa a valer mais do
-    /// que a intenção já aplicada na tela.
+    /// Fim de uma escrita de e-mail (lido, mover, excluir): o tipo da escrita,
+    /// os alvos, o erro se houve, e a lista do servidor depois dela. Vem tudo
+    /// junto porque só quando o servidor responde é que a lista dele passa a
+    /// valer mais do que a intenção já aplicada na tela.
+    ///
+    /// O `kind` existe porque o mesmo e-mail pode ter duas escritas na fila
+    /// (marcado como lido e movido em seguida): encerrar a pendência errada
+    /// ressuscitava a linha que ainda ia sair.
     EmailWrite {
+        kind: EmailWriteKind,
         targets: Vec<(crate::data::Account, String)>,
         error: Option<String>,
         list: Result<Vec<EmailItem>, String>,

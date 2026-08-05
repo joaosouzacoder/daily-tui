@@ -14,7 +14,7 @@ use crate::data::jira::{JiraFilter, JiraItem, JiraView};
 use crate::data::tasks::SubTask;
 use crate::data::{notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
-use crate::msg::Msg;
+use crate::msg::{EmailWriteKind, Msg};
 use crate::store::Store;
 use crate::ui;
 use crate::worker::WorkerCmd;
@@ -369,12 +369,23 @@ impl EmailPending {
         }
     }
 
-    /// Encerra a pendência dos alvos: o servidor já disse o que aconteceu com
-    /// eles, e a lista que vem com essa resposta passa a ser a verdade.
-    fn settle(&mut self, targets: &[EmailKey]) {
+    /// Encerra a pendência **daquela** escrita: o servidor já disse o que
+    /// aconteceu com ela, e a lista que vem na resposta passa a ser a verdade.
+    ///
+    /// Só a pendência do tipo que terminou sai de cena. O mesmo e-mail pode ter
+    /// duas escritas na fila — marcado como lido e movido em seguida —, e a
+    /// resposta do "lido" chega antes de o mover sequer rodar: limpar as duas
+    /// aqui fazia a lista do servidor ressuscitar a linha que ainda ia sair.
+    fn settle(&mut self, kind: EmailWriteKind, targets: &[EmailKey]) {
         for key in targets {
-            self.removed.remove(key);
-            self.seen.remove(key);
+            match kind {
+                EmailWriteKind::Seen => {
+                    self.seen.remove(key);
+                }
+                EmailWriteKind::Gone => {
+                    self.removed.remove(key);
+                }
+            }
         }
     }
 }
@@ -1280,13 +1291,14 @@ impl Model for App {
                 self.last_refresh = Some(Local::now());
             }
             Msg::EmailWrite {
+                kind,
                 targets,
                 error,
                 list,
             } => {
                 // A resposta chegou sobre estes alvos: a lista que vem com ela
                 // já os reflete, então a intenção local sai de cena aqui.
-                self.emails_pending.settle(&targets);
+                self.emails_pending.settle(kind, &targets);
                 self.set_emails(list);
                 if let Some(e) = error {
                     // Escrita falhou: os alvos voltam do servidor de propósito —
@@ -1808,6 +1820,7 @@ mod tests {
 
         // Resposta da própria exclusão: daqui em diante a lista do servidor vale.
         app.update(Msg::EmailWrite {
+            kind: EmailWriteKind::Gone,
             targets: vec![(Account::Personal, "2".to_string())],
             error: None,
             list: Ok(vec![email_item("1", false)]),
@@ -1824,6 +1837,66 @@ mod tests {
     }
 
     #[test]
+    fn marking_read_and_then_moving_does_not_bring_the_emails_back() {
+        // A sequência do relato: marcar vários como lidos e mover em seguida. As
+        // duas escritas ficam na fila do worker para os MESMOS e-mails, e a
+        // resposta do "lido" chega primeiro — antes de o mover rodar. Encerrar
+        // toda a pendência ali fazia a lista do servidor (que ainda os tinha)
+        // ressuscitar as linhas "segundos depois".
+        let mut app = test_app();
+        app.emails.items = vec![email_item("1", true), email_item("2", true)];
+        app.emails.loaded = true;
+        app.folders
+            .insert(Account::Personal, vec!["Clientes".to_string()]);
+
+        // Marca os dois e manda "lido".
+        app.update(key(KeyCode::Char('x')));
+        app.update(key(KeyCode::Char('j')));
+        app.update(key(KeyCode::Char('x')));
+        app.update(key(KeyCode::Char(' ')));
+
+        // Move os dois (o seletor abre com a pasta em cache).
+        app.emails_marked = [
+            (Account::Personal, "1".to_string()),
+            (Account::Personal, "2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        app.update(key(KeyCode::Char('m')));
+        app.update(key(KeyCode::Enter));
+        assert!(app.emails.items.is_empty(), "saem da tela na hora");
+
+        // Resposta do "lido", com a lista de antes do mover.
+        app.update(Msg::EmailWrite {
+            kind: EmailWriteKind::Seen,
+            targets: vec![
+                (Account::Personal, "1".to_string()),
+                (Account::Personal, "2".to_string()),
+            ],
+            error: None,
+            list: Ok(vec![email_item("1", false), email_item("2", false)]),
+        });
+        assert!(
+            app.emails.items.is_empty(),
+            "o mover ainda está na fila: as linhas não voltam"
+        );
+
+        // Resposta do mover: daqui em diante a lista do servidor manda.
+        app.update(Msg::EmailWrite {
+            kind: EmailWriteKind::Gone,
+            targets: vec![
+                (Account::Personal, "1".to_string()),
+                (Account::Personal, "2".to_string()),
+            ],
+            error: None,
+            list: Ok(vec![]),
+        });
+        assert!(app.emails.items.is_empty());
+        app.update(Msg::EmailsLoaded(Ok(vec![email_item("9", false)])));
+        assert_eq!(app.emails.items.len(), 1, "e a lista volta a ser a do servidor");
+    }
+
+    #[test]
     fn a_failed_delete_brings_the_email_back_and_says_why() {
         // Falhar em silêncio era pior: sumia da tela, voltava no reload seguinte
         // e o motivo nunca aparecia.
@@ -1836,6 +1909,7 @@ mod tests {
         assert!(app.emails.items.is_empty(), "sai da tela na hora");
 
         app.update(Msg::EmailWrite {
+            kind: EmailWriteKind::Gone,
             targets: vec![(Account::Personal, "1".to_string())],
             error: Some("himalaya falhou: pasta não encontrada".into()),
             list: Ok(vec![email_item("1", false)]),
