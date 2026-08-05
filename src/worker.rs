@@ -107,7 +107,8 @@ pub fn spawn(
                     let _ = ui.send(Msg::FoldersLoaded(account, email::folders(account)));
                 }
                 Ok(WorkerCmd::ReadEmail { account, id }) => {
-                    let _ = ui.send(Msg::EmailBody(email::fetch_body(account, &id)));
+                    let body = email::fetch_body(account, &id);
+                    let _ = ui.send(Msg::EmailBody(account, id, body));
                 }
                 Ok(WorkerCmd::EmailSetSeen { items, seen }) => mutate_emails(
                     &ui,

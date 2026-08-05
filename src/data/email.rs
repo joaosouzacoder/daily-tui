@@ -200,16 +200,157 @@ fn run(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Busca o corpo (texto) de um e-mail específico.
+/// Busca o corpo de um e-mail, já legível.
+///
+/// Usa `--preview` de propósito: sem ele o himalaya marca o envelope como lido
+/// só por ter sido aberto, e aqui o corpo também é buscado em segundo plano —
+/// marcar como lido tem de ser uma decisão sua (`Espaço`), não efeito colateral
+/// de o cursor ter passado por cima.
 pub fn fetch_body(account: Account, id: &str) -> Result<String, String> {
-    run(&[
+    let raw = run(&[
         "message",
         "read",
         id,
         "-a",
         account.himalaya_name(),
         "--no-headers",
-    ])
+        "--preview",
+    ])?;
+    Ok(readable(&raw))
+}
+
+/// Deixa o corpo legível num terminal.
+///
+/// Muito e-mail só tem parte HTML, e o himalaya entrega a marcação crua — uma
+/// parede de `<table>` e `style` que não se lê. Isto não é um renderizador de
+/// HTML: é o suficiente para o texto voltar a ter parágrafos e linhas.
+pub fn readable(raw: &str) -> String {
+    if !looks_like_html(raw) {
+        return collapse_blank_lines(raw);
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    let mut in_tag = false;
+    let mut tag = String::new();
+    let mut skip_until: Option<&'static str> = None;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                let name: String = tag
+                    .trim_start_matches('/')
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                // `script`/`style` têm conteúdo que não é texto: pula até fechar.
+                if skip_until.is_none() {
+                    match name.as_str() {
+                        "script" if !tag.starts_with('/') => skip_until = Some("script"),
+                        "style" if !tag.starts_with('/') => skip_until = Some("style"),
+                        _ => {}
+                    }
+                } else if Some(name.as_str()) == skip_until && tag.starts_with('/') {
+                    skip_until = None;
+                }
+                // Tags que separam blocos viram quebra de linha.
+                if skip_until.is_none()
+                    && matches!(
+                        name.as_str(),
+                        "br" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "table" | "blockquote"
+                    )
+                {
+                    out.push('\n');
+                }
+            }
+            _ if in_tag => tag.push(c),
+            _ if skip_until.is_some() => {}
+            '&' => {
+                let mut entity = String::new();
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if n == ';' || entity.len() > 8 {
+                        break;
+                    }
+                    entity.push(n);
+                }
+                out.push_str(&decode_entity(&entity));
+            }
+            _ => out.push(c),
+        }
+    }
+    collapse_blank_lines(&out)
+}
+
+fn looks_like_html(raw: &str) -> bool {
+    let head: String = raw.chars().take(2000).collect::<String>().to_lowercase();
+    ["<html", "<body", "<div", "<table", "<p>", "<p ", "<br", "<!doctype html"]
+        .iter()
+        .any(|m| head.contains(m))
+}
+
+/// Entidades nomeadas que aparecem de fato em e-mail.
+///
+/// A lista é curta de propósito, mas cobre as acentuadas do português: e-mail em
+/// pt-BR vem cheio de `&atilde;` e `&ccedil;`, e sem isso o corpo fica ilegível
+/// justamente nas palavras que importam.
+const ENTITIES: &[(&str, &str)] = &[
+    ("amp", "&"), ("lt", "<"), ("gt", ">"), ("quot", "\""),
+    ("apos", "'"), ("nbsp", " "),
+    ("hellip", "…"), ("mdash", "—"), ("ndash", "–"), ("bull", "•"),
+    ("laquo", "«"), ("raquo", "»"), ("deg", "°"), ("middot", "·"),
+    ("copy", "©"), ("reg", "®"), ("trade", "™"), ("euro", "€"), ("pound", "£"),
+    ("aacute", "á"), ("agrave", "à"), ("atilde", "ã"), ("acirc", "â"), ("auml", "ä"),
+    ("eacute", "é"), ("egrave", "è"), ("ecirc", "ê"),
+    ("iacute", "í"), ("icirc", "î"),
+    ("oacute", "ó"), ("otilde", "õ"), ("ocirc", "ô"), ("ouml", "ö"),
+    ("uacute", "ú"), ("ucirc", "û"), ("uuml", "ü"),
+    ("ccedil", "ç"), ("ntilde", "ñ"),
+    ("Aacute", "Á"), ("Atilde", "Ã"), ("Acirc", "Â"),
+    ("Eacute", "É"), ("Ecirc", "Ê"), ("Iacute", "Í"),
+    ("Oacute", "Ó"), ("Otilde", "Õ"), ("Ocirc", "Ô"),
+    ("Uacute", "Ú"), ("Ccedil", "Ç"),
+];
+
+/// Decodifica uma entidade; o que não estiver na tabela vira o próprio texto.
+fn decode_entity(entity: &str) -> String {
+    if let Some((_, ch)) = ENTITIES.iter().find(|(name, _)| *name == entity) {
+        return (*ch).into();
+    }
+    match entity {
+        "#39" => "'".into(),
+        "#160" => " ".into(),
+        other => other
+            .strip_prefix('#')
+            .and_then(|n| n.parse::<u32>().ok())
+            .and_then(char::from_u32)
+            .map(String::from)
+            .unwrap_or_else(|| format!("&{other};")),
+    }
+}
+
+/// Tira espaço no fim das linhas e comprime sequências de linhas vazias.
+fn collapse_blank_lines(raw: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut blanks = 0;
+    for line in raw.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
 }
 
 #[cfg(test)]
@@ -263,6 +404,42 @@ mod tests {
         assert_eq!(items[0].from, "");
         assert_eq!(items[0].date, "");
         assert!(items[0].unread, "sem flag Seen -> não lido");
+    }
+
+    #[test]
+    fn plain_text_body_is_left_alone_apart_from_blank_lines() {
+        let raw = "Oi João,   \n\n\n\nSegue o relatório.\n\n\n";
+        assert_eq!(readable(raw), "Oi João,\n\nSegue o relatório.");
+    }
+
+    #[test]
+    fn html_body_becomes_readable_text() {
+        // Forma típica de e-mail de marketing: tabela, style, entidades.
+        let raw = concat!(
+            "<html><head><style>.x{color:red}</style></head><body>",
+            "<div>Ol&aacute;, <b>Jo&atilde;o</b>!</div>",
+            "<p>Seu saldo &eacute; R$&nbsp;1.234 &amp; sobe.</p>",
+            "<script>track()</script>",
+            "<table><tr><td>Item</td></tr><tr><td>Outro</td></tr></table>",
+            "</body></html>"
+        );
+        let out = readable(raw);
+        assert!(!out.contains('<'), "nenhuma tag sobra: {out}");
+        assert!(!out.contains("color:red"), "o css não é texto");
+        assert!(!out.contains("track()"), "o script não é texto");
+        assert!(out.contains("João"), "entidade nomeada decodificada");
+        assert!(out.contains("R$ 1.234 & sobe"), "nbsp e amp: {out}");
+        let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines,
+            vec!["Olá, João!", "Seu saldo é R$ 1.234 & sobe.", "Item", "Outro"],
+            "cada bloco do HTML vira uma linha própria"
+        );
+    }
+
+    #[test]
+    fn numeric_entities_and_unknown_ones_survive() {
+        assert_eq!(readable("<p>caf&#233; &naoexiste; fim</p>"), "café &naoexiste; fim");
     }
 
     #[test]

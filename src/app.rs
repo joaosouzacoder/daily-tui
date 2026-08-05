@@ -187,6 +187,11 @@ pub struct App {
     pub emails_marked: std::collections::HashSet<String>,
     /// Pastas por conta, buscadas uma vez por sessão para o seletor de "mover".
     pub folders: std::collections::HashMap<Account, Vec<String>>,
+    /// Corpos já buscados, por (conta, id). O corpo do e-mail sob o cursor é
+    /// buscado em segundo plano, então abrir com `Enter` costuma ser instantâneo.
+    pub bodies: std::collections::HashMap<(Account, String), String>,
+    /// Corpos pedidos e ainda não respondidos, para não pedir duas vezes.
+    pending_bodies: std::collections::HashSet<(Account, String)>,
     /// Visão ativa do painel de Jira (issues/por-pai/menções), circulada por
     /// `p`/`n`/`Esc`.
     pub jira_view: JiraView,
@@ -220,6 +225,8 @@ impl App {
             tasks_expanded: std::collections::HashSet::new(),
             emails_marked: std::collections::HashSet::new(),
             folders: std::collections::HashMap::new(),
+            bodies: std::collections::HashMap::new(),
+            pending_bodies: std::collections::HashSet::new(),
             jira_mentions: PanelData::new(),
             agenda: PanelData::new(),
             pulls: PanelData::new(),
@@ -287,18 +294,50 @@ impl App {
     }
 
     fn open_detail(&mut self) {
-        if let Some(item) = self.emails.items.get(self.emails.cursor) {
-            self.detail = Some(Detail {
-                from: item.from.clone(),
-                subject: item.subject.clone(),
-                body: None,
-                scroll: 0,
-            });
-            let _ = self.cmd_tx.send(WorkerCmd::ReadEmail {
-                account: item.account,
-                id: item.id.clone(),
-            });
+        if self.focus != Panel::Email {
+            return;
         }
+        let Some(item) = self.emails.items.get(self.emails.cursor) else {
+            return;
+        };
+        let key = (item.account, item.id.clone());
+        self.detail = Some(Detail {
+            from: item.from.clone(),
+            subject: item.subject.clone(),
+            // Se o prefetch já trouxe, abre preenchido em vez de "carregando".
+            body: self.bodies.get(&key).cloned().map(Ok),
+            scroll: 0,
+        });
+        if self.detail.as_ref().is_some_and(|d| d.body.is_none()) {
+            self.request_body(key);
+        }
+    }
+
+    /// Pede o corpo ao worker, a menos que já esteja em cache ou a caminho.
+    fn request_body(&mut self, key: (Account, String)) {
+        if self.bodies.contains_key(&key) || self.pending_bodies.contains(&key) {
+            return;
+        }
+        self.pending_bodies.insert(key.clone());
+        let _ = self.cmd_tx.send(WorkerCmd::ReadEmail {
+            account: key.0,
+            id: key.1,
+        });
+    }
+
+    /// Busca em segundo plano o corpo do e-mail sob o cursor.
+    ///
+    /// Chamado no tique de 1s em vez de a cada movimento do cursor: rolar a lista
+    /// depressa não deve enfileirar uma ida ao IMAP por linha, e um segundo de
+    /// pausa é bom sinal de que é esse o e-mail que interessa.
+    fn prefetch_cursor_body(&mut self) {
+        if self.focus != Panel::Email {
+            return;
+        }
+        let Some(item) = self.emails.items.get(self.emails.cursor) else {
+            return;
+        };
+        self.request_body((item.account, item.id.clone()));
     }
 
     /// Abre no navegador a issue sob o cursor. O erro vai para o painel, como
@@ -768,6 +807,7 @@ impl Model for App {
     fn update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
             Msg::ClockTick => {
+                self.prefetch_cursor_body();
                 self.now = Local::now();
                 self.spinner.tick();
             }
@@ -809,9 +849,20 @@ impl Model for App {
                     Err(e) => self.emails.error = Some(e),
                 }
             }
-            Msg::EmailBody(res) => {
-                if let Some(d) = &mut self.detail {
-                    d.body = Some(res);
+            Msg::EmailBody(account, id, res) => {
+                let key = (account, id);
+                self.pending_bodies.remove(&key);
+                if let Ok(body) = &res {
+                    self.bodies.insert(key.clone(), body.clone());
+                }
+                // Só preenche o overlay se ainda for o e-mail aberto.
+                let open_is_this = self
+                    .emails
+                    .items
+                    .get(self.emails.cursor)
+                    .is_some_and(|e| (e.account, e.id.clone()) == key);
+                if let (true, Some(detail)) = (open_is_this, &mut self.detail) {
+                    detail.body = Some(res);
                 }
             }
         }
@@ -1288,9 +1339,37 @@ mod tests {
         let mut app = test_app();
         app.emails.set(Ok(vec![email("1")]));
         app.update(key(KeyCode::Enter));
-        app.update(Msg::EmailBody(Ok("corpo".into())));
+        app.update(Msg::EmailBody(Account::Work, "1".into(), Ok("corpo".into())));
         let d = app.detail.as_ref().unwrap();
         assert_eq!(d.body.as_ref().unwrap().as_ref().unwrap(), "corpo");
+    }
+
+    #[test]
+    fn a_prefetched_body_opens_instantly_without_asking_again() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(BubbleTheme::default(), tx);
+        app.emails.set(Ok(vec![email("1")]));
+
+        // O tique de 1s pede o corpo do e-mail sob o cursor.
+        app.update(Msg::ClockTick);
+        assert!(matches!(rx.try_recv(), Ok(WorkerCmd::ReadEmail { .. })));
+        // Um segundo tique não repete o pedido.
+        app.update(Msg::ClockTick);
+        assert!(rx.try_recv().is_err(), "não pede duas vezes o mesmo corpo");
+
+        app.update(Msg::EmailBody(
+            Account::Work,
+            "1".into(),
+            Ok("já em cache".into()),
+        ));
+        app.update(key(KeyCode::Enter));
+        let d = app.detail.as_ref().unwrap();
+        assert_eq!(
+            d.body.as_ref().unwrap().as_ref().unwrap(),
+            "já em cache",
+            "abre preenchido, sem passar por carregando"
+        );
+        assert!(rx.try_recv().is_err(), "e sem pedir de novo ao abrir");
     }
 
     #[test]

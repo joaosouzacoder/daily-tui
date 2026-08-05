@@ -26,6 +26,7 @@ pub enum Msg {
     TasksLoaded(Result<Vec<TaskItem>, String>),
     /// Pastas de uma conta, para o seletor de "mover" (inclui as etiquetas).
     FoldersLoaded(crate::data::Account, Result<Vec<String>, String>),
-    /// Corpo de um e-mail aberto no overlay de detalhe.
-    EmailBody(Result<String, String>),
+    /// Corpo de um e-mail. Carrega a chave porque o corpo é buscado em segundo
+    /// plano: quando chega, pode não ser mais o e-mail sob o cursor.
+    EmailBody(crate::data::Account, String, Result<String, String>),
 }

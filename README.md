@@ -426,6 +426,16 @@ com o marcador da conta (`[W]`/`[P]`). Escolher uma pasta move só os alvos daqu
 conta — uma etiqueta do work não existe na pessoal, então o resto do lote fica
 onde está.
 
+**O corpo é buscado em segundo plano.** Um segundo depois de o cursor parar num
+e-mail, o corpo é buscado e guardado em cache — então `Enter` costuma abrir
+instantâneo. A busca usa `--preview`, que impede o himalaya de marcar o e-mail
+como lido só por ter sido aberto: marcar é decisão sua, com `Espaço`.
+
+E-mail que só tem parte HTML é convertido para texto legível (tags fora, `script`
+e `style` descartados, blocos virando linhas, entidades decodificadas — inclusive
+as acentuadas do português). Quando existe parte texto, o himalaya já a prefere e
+o corpo passa intacto.
+
 As escritas aparecem na tela **na hora** e a re-busca reconcilia depois. Se a
 escrita falhar, o erro aparece no painel e a lista volta ao que o servidor diz.
 
