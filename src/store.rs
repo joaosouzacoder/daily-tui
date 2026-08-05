@@ -105,7 +105,7 @@ impl Store {
     /// A ordem importa — o seletor mostra as canônicas primeiro —, então ela é
     /// gravada como coluna em vez de depender da ordem de leitura.
     pub fn save_folders(&self, account: Account, names: &[String], at: &str) -> Result<(), String> {
-        let key = account.himalaya_name();
+        let key = account.slot_key();
         let tx = self
             .conn
             .unchecked_transaction()
@@ -126,8 +126,8 @@ impl Store {
 
     /// Pastas em cache, por conta, na ordem em que foram gravadas.
     ///
-    /// Contas que não são mais do app (config mudou) são ignoradas em vez de
-    /// virarem erro: o cache é conveniência, não fonte da verdade.
+    /// Chave desconhecida (banco de uma versão antiga) é ignorada em vez de
+    /// virar erro: o cache é conveniência, não fonte da verdade.
     pub fn folders(&self) -> Result<HashMap<Account, Vec<String>>, String> {
         let mut stmt = self
             .conn
@@ -142,7 +142,7 @@ impl Store {
         let mut out: HashMap<Account, Vec<String>> = HashMap::new();
         for row in rows {
             let (account, name) = row.map_err(|e| format!("lendo pastas: {e}"))?;
-            if let Some(account) = Account::from_himalaya_name(&account) {
+            if let Some(account) = Account::from_slot_key(&account) {
                 out.entry(account).or_default().push(name);
             }
         }

@@ -11,18 +11,12 @@ use crate::data::jira::JiraFilter;
 use crate::data::{agenda, email, jira, pulls, tasks, Account};
 use crate::msg::Msg;
 
-/// Quantos e-mails buscar por conta.
-const EMAIL_LIMIT: u32 = 50;
-
 /// De quanto em quanto tempo relistar as pastas das contas.
 ///
 /// Etiqueta nova é raro, e listar pastas é uma ida ao IMAP por conta — cadência
 /// própria, mais folgada que o refresh dos painéis, para não cobrar do usuário
 /// uma espera que ele não pediu.
 const FOLDERS_TTL: Duration = Duration::from_secs(600);
-
-/// Contas cujas pastas e e-mails são buscados.
-const ACCOUNTS: [Account; 2] = [Account::Work, Account::Personal];
 
 /// Comandos enviados do loop principal para o worker.
 pub enum WorkerCmd {
@@ -201,7 +195,7 @@ fn refresh_folders(ui: &ProgramHandle<Msg>, at: &mut Option<Instant>) {
     if !stale {
         return;
     }
-    for account in ACCOUNTS {
+    for account in Account::configured() {
         let _ = ui.send(Msg::FoldersLoaded(account, email::folders(account)));
     }
     *at = Some(Instant::now());
@@ -245,18 +239,24 @@ fn mutate_emails(
     });
 }
 
-/// Agrega e-mails das duas contas e ordena do mais recente para o mais antigo.
+/// Agrega os e-mails das contas configuradas, do mais recente para o mais
+/// antigo. Quem tem uma conta só não paga a busca da outra.
 fn fetch_emails() -> Result<Vec<email::EmailItem>, String> {
-    let mut all = email::fetch(ACCOUNTS[0], EMAIL_LIMIT)?;
-    all.extend(email::fetch(ACCOUNTS[1], EMAIL_LIMIT)?);
+    let limit = crate::config::get().email.limit;
+    let mut all = Vec::new();
+    for account in Account::configured() {
+        all.extend(email::fetch(account, limit)?);
+    }
     email::sort_recent_first(&mut all);
     Ok(all)
 }
 
-/// Agrega a agenda das duas contas e ordena cronologicamente.
+/// Agrega a agenda das contas configuradas e ordena cronologicamente.
 fn fetch_agenda() -> Result<Vec<agenda::AgendaItem>, String> {
-    let mut all = agenda::fetch(Account::Work)?;
-    all.extend(agenda::fetch(Account::Personal)?);
+    let mut all = Vec::new();
+    for account in Account::configured() {
+        all.extend(agenda::fetch(account)?);
+    }
     agenda::sort_chronologically(&mut all);
     Ok(all)
 }

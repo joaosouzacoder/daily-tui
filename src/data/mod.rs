@@ -113,47 +113,86 @@ pub enum Account {
 }
 
 impl Account {
-    /// Marcador curto exibido na lista.
-    pub const fn marker(self) -> &'static str {
-        match self {
-            Account::Work => "[W]",
-            Account::Personal => "[P]",
-        }
-    }
-
-    /// Nome da conta no himalaya.
-    pub const fn himalaya_name(self) -> &'static str {
+    /// Nome estável do slot, para persistência.
+    ///
+    /// **Não** muda com o config: o cache de pastas no banco é chaveado por ele,
+    /// e renomear a conta no himalaya não pode invalidar o cache.
+    pub const fn slot_key(self) -> &'static str {
         match self {
             Account::Work => "work",
             Account::Personal => "personal",
         }
     }
 
-    /// A conta com este nome do himalaya, se for uma das do app.
-    ///
-    /// Usado para reler o que foi persistido: o nome é a chave estável no banco.
-    pub fn from_himalaya_name(name: &str) -> Option<Self> {
-        match name {
+    /// O slot com esta chave, se for um dos dois.
+    pub fn from_slot_key(key: &str) -> Option<Self> {
+        match key {
             "work" => Some(Account::Work),
             "personal" => Some(Account::Personal),
             _ => None,
         }
     }
 
-    /// Subdiretório da conta no gcalcli (sob `~/.local/share/gcalcli-accounts`).
-    pub const fn gcalcli_dir(self) -> &'static str {
+    /// Posição do slot na lista de contas do config.
+    const fn slot(self) -> usize {
         match self {
-            Account::Work => "work",
-            Account::Personal => "personal",
+            Account::Work => 0,
+            Account::Personal => 1,
+        }
+    }
+
+    /// Config desta conta, ou `None` quando ela não existe no arquivo.
+    pub fn cfg(self) -> Option<&'static crate::config::AccountCfg> {
+        crate::config::get().accounts.get(self.slot())
+    }
+
+    /// Contas que existem, na ordem do config. Quem só tem uma conta configurada
+    /// não recebe erro pela outra: ela simplesmente não é buscada.
+    pub fn configured() -> Vec<Account> {
+        [Account::Work, Account::Personal]
+            .into_iter()
+            .filter(|a| a.cfg().is_some())
+            .collect()
+    }
+
+    /// Marcador curto exibido na lista (`[W]`, `[P]`).
+    pub fn marker(self) -> String {
+        let label = match self.cfg() {
+            Some(c) if !c.label.is_empty() => c.label.clone(),
+            // Sem rótulo no config, a inicial do slot serve.
+            _ => self.slot_key()[..1].to_uppercase(),
+        };
+        format!("[{label}]")
+    }
+
+    /// Nome da conta no himalaya.
+    pub fn himalaya_name(self) -> &'static str {
+        match self.cfg() {
+            Some(c) if !c.id.is_empty() => c.id.as_str(),
+            _ => self.slot_key(),
+        }
+    }
+
+    /// Subdiretório da conta no gcalcli (sob `~/.local/share/gcalcli-accounts`).
+    pub fn gcalcli_dir(self) -> &'static str {
+        match self.cfg() {
+            Some(c) if !c.calendar.is_empty() => c.calendar.as_str(),
+            _ => self.slot_key(),
         }
     }
 
     /// E-mail da calendar primária da conta — usado no `--calendar` do gcalcli
     /// para filtrar só a sua agenda (sem salas nem calendars de colegas).
     ///
-    /// Lido das variáveis `DAILY_TUI_WORK_EMAIL` / `DAILY_TUI_PERSONAL_EMAIL`,
-    /// com placeholder de fallback, para não fixar e-mail no código.
+    /// Vem do config; na falta dele, das variáveis `DAILY_TUI_WORK_EMAIL` /
+    /// `DAILY_TUI_PERSONAL_EMAIL`, que é como isso funcionava antes do config
+    /// existir. Por último, um placeholder — nunca um e-mail no código.
     pub fn primary_calendar(self) -> String {
+        if let Some(c) = self.cfg()
+            && !c.email.is_empty()
+        {
+            return c.email.clone();
+        }
         let (var, default) = match self {
             Account::Work => ("DAILY_TUI_WORK_EMAIL", "you-work@example.com"),
             Account::Personal => ("DAILY_TUI_PERSONAL_EMAIL", "you@example.com"),
@@ -238,6 +277,35 @@ mod tests {
     #[test]
     fn output_carries_no_ansi_escapes() {
         assert!(!stderr_summary(HIMALAYA_OAUTH_FAIL).contains('\x1b'));
+    }
+
+    #[test]
+    fn an_account_reads_its_names_from_the_config() {
+        // Sem config, os nomes são os de sempre: quem já usava não sente.
+        assert_eq!(Account::Work.himalaya_name(), "work");
+        assert_eq!(Account::Personal.himalaya_name(), "personal");
+        assert_eq!(Account::Work.marker(), "[W]");
+        assert_eq!(Account::Personal.marker(), "[P]");
+        assert_eq!(Account::Work.gcalcli_dir(), "work");
+    }
+
+    #[test]
+    fn the_slot_key_does_not_follow_a_renamed_account() {
+        // O banco chaveia o cache de pastas por ele: renomear a conta no
+        // himalaya não pode invalidar o cache.
+        assert_eq!(Account::Work.slot_key(), "work");
+        assert_eq!(Account::Personal.slot_key(), "personal");
+        assert_eq!(Account::from_slot_key("personal"), Some(Account::Personal));
+        assert_eq!(Account::from_slot_key("faculdade"), None);
+    }
+
+    #[test]
+    fn the_default_config_has_both_slots() {
+        assert_eq!(
+            Account::configured(),
+            vec![Account::Work, Account::Personal],
+            "sem config, as duas contas de sempre"
+        );
     }
 
     #[test]
