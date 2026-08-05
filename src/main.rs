@@ -121,48 +121,6 @@ fn main() -> std::io::Result<()> {
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn args(list: &[&str]) -> Cmd {
-        parse_args(list.iter().map(|s| s.to_string()))
-    }
-
-    #[test]
-    fn no_arguments_opens_the_panel_with_the_default_config() {
-        assert!(matches!(args(&[]), Cmd::Run(None)));
-    }
-
-    #[test]
-    fn config_takes_the_next_argument_as_its_path() {
-        match args(&["--config", "/tmp/x.toml"]) {
-            Cmd::Run(Some(path)) => assert_eq!(path, std::path::PathBuf::from("/tmp/x.toml")),
-            _ => panic!("esperava Run com caminho"),
-        }
-    }
-
-    #[test]
-    fn config_without_a_path_is_refused_instead_of_ignored() {
-        assert!(matches!(args(&["--config"]), Cmd::Unknown(_)));
-    }
-
-    #[test]
-    fn print_config_keeps_the_chosen_file() {
-        assert!(matches!(
-            args(&["--config", "/tmp/x.toml", "--print-config"]),
-            Cmd::PrintConfig(Some(_))
-        ));
-    }
-
-    #[test]
-    fn an_unknown_flag_does_not_silently_open_the_panel() {
-        // Abrir a TUI engolindo um `--panels` inventado esconderia o erro de
-        // digitação atrás de uma tela cheia.
-        assert!(matches!(args(&["--panels"]), Cmd::Unknown(_)));
-    }
-}
-
 fn run(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
     let (ui_handle, ui_rx) = ratatui_tea::channel::<Msg>();
     let refresh = Duration::from_secs(config::get().refresh.seconds);
@@ -217,4 +175,46 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
     let _ = cmd_tx.send(WorkerCmd::Quit);
     let _ = worker_handle.join();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Cmd {
+        parse_args(list.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn no_arguments_opens_the_panel_with_the_default_config() {
+        assert!(matches!(args(&[]), Cmd::Run(None)));
+    }
+
+    #[test]
+    fn config_takes_the_next_argument_as_its_path() {
+        match args(&["--config", "/tmp/x.toml"]) {
+            Cmd::Run(Some(path)) => assert_eq!(path, std::path::PathBuf::from("/tmp/x.toml")),
+            _ => panic!("esperava Run com caminho"),
+        }
+    }
+
+    #[test]
+    fn config_without_a_path_is_refused_instead_of_ignored() {
+        assert!(matches!(args(&["--config"]), Cmd::Unknown(_)));
+    }
+
+    #[test]
+    fn print_config_keeps_the_chosen_file() {
+        assert!(matches!(
+            args(&["--config", "/tmp/x.toml", "--print-config"]),
+            Cmd::PrintConfig(Some(_))
+        ));
+    }
+
+    #[test]
+    fn an_unknown_flag_does_not_silently_open_the_panel() {
+        // Abrir a TUI engolindo um `--panels` inventado esconderia o erro de
+        // digitação atrás de uma tela cheia.
+        assert!(matches!(args(&["--panels"]), Cmd::Unknown(_)));
+    }
 }
