@@ -239,18 +239,22 @@ pub fn parse_message_id(raw: &str) -> Result<String, String> {
 /// Link que abre esta mensagem no Gmail.
 ///
 /// O Gmail não expõe o id do himalaya (que é a UID do IMAP), mas acha a mensagem
-/// pelo header com o operador de busca `rfc822msgid`. Com o `authuser` o link
-/// abre na conta certa de quem tem mais de uma logada no navegador.
+/// pelo header com o operador de busca `rfc822msgid`.
+///
+/// A conta vai **no caminho** (`/mail/u/<e-mail>/`), não em `?authuser=`: o
+/// `/mail/u/?authuser=…` não é a URL canônica, e o Gmail redireciona para
+/// resolver o índice da conta — no redirect o `#search/…` se perde e a aba abre
+/// na home da caixa (medido em 2026-08-05). O caminho com a conta já é canônico,
+/// então o fragmento chega inteiro. Sem endereço conhecido, sobra o índice 0,
+/// que é a única conta quando cada uma vive num profile do navegador.
 pub fn gmail_url(address: &str, message_id: &str) -> String {
     let msgid = percent_encode(message_id);
-    if address.is_empty() {
-        format!("https://mail.google.com/mail/u/0/#search/rfc822msgid%3A{msgid}")
+    let account = if address.is_empty() {
+        "0".to_string()
     } else {
-        format!(
-            "https://mail.google.com/mail/u/?authuser={}#search/rfc822msgid%3A{msgid}",
-            percent_encode(address)
-        )
-    }
+        percent_encode(address)
+    };
+    format!("https://mail.google.com/mail/u/{account}/#search/rfc822msgid%3A{msgid}")
 }
 
 /// Escapa o que não é seguro numa URL. `Message-ID` costuma ter `@`, `+`, `/` e
@@ -466,11 +470,22 @@ só corpo aqui
     #[test]
     fn the_gmail_link_searches_by_message_id_in_the_right_account() {
         let url = gmail_url("voce@exemplo.com", "abc+def/ghi=@mail.example.com");
-        assert!(url.starts_with("https://mail.google.com/mail/u/?authuser=voce%40exemplo.com"));
-        assert!(url.contains("#search/rfc822msgid%3A"), "{url}");
+        assert!(
+            url.starts_with("https://mail.google.com/mail/u/voce%40exemplo.com/#search/"),
+            "{url}"
+        );
         // `+`, `/`, `=` e `@` escapados: sem isso o Gmail lê parte do id como
         // outra coisa e não acha a mensagem.
         assert!(url.ends_with("abc%2Bdef%2Fghi%3D%40mail.example.com"), "{url}");
+    }
+
+    #[test]
+    fn the_account_goes_in_the_path_and_never_in_authuser() {
+        // `/mail/u/?authuser=…` redireciona para resolver o índice da conta, e o
+        // `#search/…` se perde no redirect: a aba abria na home da caixa.
+        let url = gmail_url("voce@exemplo.com", "x@y");
+        assert!(!url.contains("authuser"), "{url}");
+        assert!(url.contains("/#search/rfc822msgid%3A"), "{url}");
     }
 
     #[test]

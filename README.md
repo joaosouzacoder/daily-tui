@@ -527,10 +527,12 @@ como lido só por ter sido aberto: marcar é decisão sua, com `Espaço`.
 
 `Ctrl+Enter` abre a mensagem **no Gmail**, no navegador. O Gmail não conhece o id
 do himalaya (que é a UID do IMAP), então o link busca pelo header `Message-ID` da
-mensagem, com o operador `rfc822msgid` — e leva o `authuser` da conta, para abrir
-na conta certa de quem tem as duas logadas. O endereço vem do config
-(`accounts.email`) ou das variáveis `DAILY_TUI_*_EMAIL`; sem nenhum dos dois, o
-link cai na primeira conta logada no navegador. Buscar o header é uma ida ao
+mensagem, com o operador `rfc822msgid`. A conta vai no caminho
+(`/mail/u/<e-mail>/`) e não em `?authuser=`: aquela forma não é canônica, o Gmail
+redireciona para resolver o índice da conta e o `#search/…` se perde no caminho —
+a aba abre na home da caixa. O endereço vem do config (`accounts.email`) ou das
+variáveis `DAILY_TUI_*_EMAIL`; sem nenhum dos dois, o link usa o índice `0`, que é
+a única conta quando cada uma vive num profile do navegador. Buscar o header é uma ida ao
 IMAP, então quem faz isso é o worker: a tela não congela, e o e-mail **não** é
 marcado como lido no caminho.
 
@@ -668,5 +670,6 @@ Primeiro recurso, sempre: **`./scripts/setup-auth.sh check`** — ele aponta qua
 | `client secret não encontrado`                   | baixe o OAuth client (Google Cloud) e rode `setup-auth.sh google`.                   |
 | Erro de compilação por OpenSSL                   | falta `libssl-dev`/`openssl-devel` — rode o `install.sh` sem `--skip-system`.        |
 | `config inválido: …` ao abrir | erro de digitação no config. A mensagem nomeia o campo; `daily-tui --print-config` mostra o que ele entendeu. |
+| `Ctrl+Enter` abre a home do Gmail, não a mensagem | o fragmento da URL se perde quando o navegador está **fechado** e precisa subir. Deixe o navegador aberto (uma aba já basta) e repita. |
 | Painel que você quer não aparece | ele está `false` no `[panels]`. Confira com `daily-tui --print-config`. |
 | `banco indisponível: …` na central de notificações | o SQLite não abriu (permissão, disco cheio). O painel segue funcionando, só sem memória entre execuções. |
