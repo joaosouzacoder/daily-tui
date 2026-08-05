@@ -181,9 +181,10 @@ mod tests {
         "\x1b[96mNote\x1b[0m: Run with --trace to enable verbose logs with backtrace.\n",
     );
 
-    // stderr real do antigo helper de Jira em PowerShell (removido nesta
-    // migração para o helper `jira` em Python) quando o domínio Atlassian
-    // devolveu 400. Mantido como fixture do parsing de erro de uma linha.
+    // Falha real do antigo helper de Jira em PowerShell (removido na migração
+    // para o helper `jira` em Python) quando o Atlassian devolveu 400. O repo é
+    // público: o nome do script e o domínio foram trocados; o formato do erro —
+    // que é o que este fixture testa — está como o PowerShell o emitiu.
     const POWERSHELL_HTTP_FAIL: &str = concat!(
         "Invoke-RestMethod : The remote server returned an error: (400) Bad Request.\n",
         "At C:\\Users\\voce\\projects\\daily-tui\\scripts\\jira-legacy.ps1:39 char:9\n",
