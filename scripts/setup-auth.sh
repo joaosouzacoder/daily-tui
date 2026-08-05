@@ -22,8 +22,8 @@ TPL="$SCRIPT_DIR/templates"
 FORCE=0
 
 # Contas — precisam bater com src/data/mod.rs (himalaya_name / gcalcli_dir).
-HIMALAYA_ACCOUNTS=(personal work)              # nomes no himalaya
-GCAL_DIRS=(personal work)                       # subdirs do gcalcli
+HIMALAYA_ACCOUNTS=(personal work)              # nomes no himalaya (default)
+GCAL_DIRS=(personal work)                       # subdirs do gcalcli (default)
 GCAL_ROOT="$HOME/.local/share/gcalcli-accounts"
 
 if [[ -t 1 ]]; then B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; X=$'\e[0m'
@@ -55,6 +55,33 @@ probe() {
   fi
 }
 
+# Le o config do usuario pelo proprio binario: e ele que conhece o formato do
+# TOML, e e o que faz o diagnostico cobrar so painel ligado. Sem o binario
+# compilado, cobra tudo -- que e o comportamento de antes do config existir.
+read_config() {
+  PANEL_EMAIL=1; PANEL_JIRA=1; PANEL_AGENDA=1; PANEL_PULLS=1; PANEL_TASKS=1
+  ACCOUNT_IDS=""
+  if have daily-tui; then
+    eval "$(daily-tui --print-config 2>/dev/null)" || true
+  fi
+  # As contas do config valem mais que o default deste script.
+  if [[ -n "$ACCOUNT_IDS" ]]; then
+    read -r -a HIMALAYA_ACCOUNTS <<< "$ACCOUNT_IDS"
+    GCAL_DIRS=("${HIMALAYA_ACCOUNTS[@]}")
+  fi
+}
+
+# Painel desligado nao e falha: e escolha. Dizer isso evita a pessoa cacar uma
+# credencial que ela nao precisa ter.
+skip_or() {  # nome, ligado?
+  if [[ "$2" != 1 ]]; then
+    printf "      ${Y}--${X} %s (desligado no config)
+" "$1"
+    return 1
+  fi
+  return 0
+}
+
 doctor() {
   step "Diagnóstico das autenticações (painéis do daily-tui)"
   echo "    CLIs no PATH:"
@@ -62,22 +89,20 @@ doctor() {
     have "$c" && printf "      ${G}✓${X} %s\n" "$c" || printf "      ${R}✗${X} %s (ausente)\n" "$c"
   done
   echo
-  for acc in "${HIMALAYA_ACCOUNTS[@]}"; do
-    probe "email:$acc" \
-      "himalaya envelope list -a $acc --page-size 1 -o json" \
-      "rode: scripts/setup-auth.sh email"
-  done
-  for dir in "${GCAL_DIRS[@]}"; do
-    probe "agenda:$dir" \
-      "XDG_DATA_HOME=$GCAL_ROOT/$dir gcalcli list" \
-      "rode: scripts/setup-auth.sh google"
-  done
-  probe "pulls (ghpending)" "ghpending" \
-    "defina GITHUB_TOKEN e rode: ghpending add"
-  probe "jira (jira)" "jira issues" \
-    "defina JIRA_EMAIL / JIRA_CLOUD / JIRA_TOKEN"
-  probe "tasks (mstodo)" "mstodo list" \
-    "rode: scripts/setup-auth.sh mstodo"
+  read_config
+  if skip_or "email" "$PANEL_EMAIL"; then
+    for acc in "${HIMALAYA_ACCOUNTS[@]}"; do
+      probe "email:$acc"         "himalaya envelope list -a $acc --page-size 1 -o json"         "rode: scripts/setup-auth.sh email"
+    done
+  fi
+  if skip_or "agenda" "$PANEL_AGENDA"; then
+    for dir in "${GCAL_DIRS[@]}"; do
+      probe "agenda:$dir"         "XDG_DATA_HOME=$GCAL_ROOT/$dir gcalcli list"         "rode: scripts/setup-auth.sh google"
+    done
+  fi
+  skip_or "pulls" "$PANEL_PULLS" && probe "pulls (ghpending)" "ghpending"     "defina GITHUB_TOKEN e rode: ghpending add"
+  skip_or "jira" "$PANEL_JIRA" && probe "jira (jira)" "jira issues"     "defina JIRA_TOKEN (cloud e email podem vir do config)"
+  skip_or "tasks" "$PANEL_TASKS" && probe "tasks (mstodo)" "mstodo list"     "rode: scripts/setup-auth.sh mstodo"
 }
 
 # ----------------------------------------------------------------- email ----

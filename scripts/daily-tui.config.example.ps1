@@ -1,5 +1,10 @@
 # daily-tui.config.example.ps1 - modelo de configuracao do launcher Windows.
 #
+# OPCIONAL. Isto serve ao launcher que busca tokens no 1Password
+# (scripts\daily-tui-launch.ps1). Sem 1Password, ignore este arquivo: exporte
+# JIRA_TOKEN e GITHUB_TOKEN no perfil do PowerShell e use `daily-tui --init`
+# para o resto (paineis, contas, dominio do Jira).
+#
 # Copie para `daily-tui.config.ps1` (mesma pasta) e preencha com os SEUS valores.
 # O arquivo `daily-tui.config.ps1` fica no .gitignore (nao vai para o repo).
 #

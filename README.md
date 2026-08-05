@@ -13,6 +13,10 @@ Painel TUI para deixar sempre rodando num monitor, com o que importa no dia a di
 Painel passivo com navegação leve: rola as listas e abre o corpo de um e-mail.
 Os dados atualizam sozinhos a cada 5 minutos (ou na hora, com `r`).
 
+**Todo painel é opcional.** O que você não usa sai do config, e aí ele não
+aparece, não recebe foco e não busca nada — e você não precisa autenticar a
+ferramenta dele.
+
 > **Como funciona por baixo:** o daily-tui **não fala** com Gmail/Google/Jira/GitHub
 > diretamente. Ele só executa CLIs já instaladas e autenticadas na sua máquina e
 > formata a saída delas. Por isso a maior parte da configuração é *configurar e
@@ -20,9 +24,34 @@ Os dados atualizam sozinhos a cada 5 minutos (ou na hora, com `r`).
 
 ---
 
+## Comece aqui
+
+1. **Instale.** `scripts/install.sh` (Linux/mac) — binário, CLIs e helpers.
+   No Windows, siga [Instalação rápida](#instalação-rápida).
+2. **Crie o config.** `daily-tui --init` escreve o arquivo comentado no lugar
+   certo do seu sistema e diz onde.
+3. **Desligue o que você não usa.** Cada painel desligado no `[panels]` é uma
+   autenticação que você não vai precisar fazer.
+4. **Autentique o que sobrou.** A tabela abaixo diz o que cada painel pede; o
+   passo a passo de cada um está em [Configuração das contas](#configuração-das-contas).
+5. **Confira.** `scripts/setup-auth.sh check` lê o seu config e cobra só o que
+   está ligado.
+
+| Painel | Ferramenta | Credencial | Como testar | Desligar |
+|---|---|---|---|---|
+| E-mails | `himalaya` | OAuth2 do Gmail (abre o navegador), token no keychain | `himalaya envelope list -a work` | `panels.email = false` |
+| Jira | helper `jira` | API token da Atlassian em `JIRA_TOKEN` | `jira issues` | `panels.jira = false` |
+| Agenda | `gcalcli` | OAuth de um projeto **seu** no Google Cloud | `cal-work agenda` | `panels.agenda = false` |
+| PRs | `ghpending` | PAT do GitHub em `GITHUB_TOKEN` | `ghpending` | `panels.pulls = false` |
+| Tarefas | helper `mstodo` | device code da Microsoft (client público) | `mstodo list` | `panels.tasks = false` |
+
+---
+
 ## Sumário
 
+- [Comece aqui](#comece-aqui)
 - [Instalação rápida](#instalação-rápida)
+- [Config: painéis e contas](#config-painéis-e-contas)
 - [O que é instalado (e por quê)](#o-que-é-instalado-e-por-quê)
 - [Configuração das contas](#configuração-das-contas) — **a parte que dá trabalho**
   - 1. E-mail (ortie + himalaya)
@@ -100,6 +129,12 @@ Garanta que `~/.local/bin` e `~/.cargo/bin` estão no seu `PATH` (o script avisa
 > `+` — por isso o `*`; o `mkdir` evita o `copy` criar um arquivo chamado `bin`
 > se a pasta ainda não existir.)
 >
+> **No Windows, o caminho simples é variável de ambiente:** exporte
+> `JIRA_TOKEN` e `GITHUB_TOKEN` no seu perfil do PowerShell e ponha o resto no
+> config (`daily-tui --init`). O `scripts\daily-tui-launch.ps1` é uma
+> alternativa **opcional**, para quem guarda esses tokens no 1Password: ele os
+> busca de lá, cacheia com DPAPI e abre o painel.
+
 > **Autenticar no Windows:** os `*.sh` não servem. Rode
 > `scripts\google-auth.cmd` (ou `powershell -File scripts\google-auth.ps1`): ele
 > faz o OAuth da **agenda** nas duas contas e, no fim, o **device code das
@@ -131,7 +166,54 @@ Ferramentas de apoio:
 
 ---
 
+## Config: painéis e contas
+
+```sh
+daily-tui --init            # escreve o config de exemplo e diz o caminho
+daily-tui --print-config    # mostra o que ele entendeu
+daily-tui --config x.toml   # usa outro arquivo (para testar)
+```
+
+| Sistema | Caminho |
+|---|---|
+| Linux/mac | `~/.config/daily-tui/config.toml` |
+| Windows | `%APPDATA%\daily-tui\config.toml` |
+
+O arquivo comentado está em
+[`config.example.toml`](config.example.toml) — ele é a documentação de cada
+campo. O essencial:
+
+```toml
+[panels]
+tasks = false            # não uso To Do: painel fora, e sem autenticar Microsoft
+
+[[accounts]]             # até duas contas; quem tem uma só apaga o segundo bloco
+id       = "work"        # o nome da conta no himalaya
+label    = "W"           # marcador na lista: [W]
+email    = "voce@empresa.com"
+calendar = "work"        # subpasta da conta no gcalcli
+
+[jira]
+cloud = "empresa.atlassian.net"
+email = "voce@empresa.com"
+```
+
+Três coisas que valem saber:
+
+- **Sem config, tudo funciona como antes**: todos os painéis ligados e duas
+  contas (`work`, `personal`).
+- **Config quebrado não abre o painel.** Ele sai com o motivo no terminal, em vez
+  de cair no default em silêncio e deixar você achando que o arquivo não pega.
+  Nome de campo errado também é erro, com o nome do campo na mensagem.
+- **Nenhum segredo vai no config.** `JIRA_TOKEN` e `GITHUB_TOKEN` continuam no
+  ambiente ou no keychain.
+
+---
+
 ## Configuração das contas
+
+> Cada seção aqui é independente. Pule direto para as dos painéis que você
+> deixou ligados — e ignore o resto.
 
 Esta é a parte que dá trabalho — e onde tudo costuma travar. **Use o script
 guiado**, que automatiza o que dá e valida o resto:
@@ -169,6 +251,8 @@ GitHub e Jira são só variáveis de ambiente (seções 4 e 5 abaixo).
 
 ### 1. E-mail — ortie + himalaya (`setup-auth.sh email`)
 
+> Pule se você deixou `panels.email = false`.
+
 O daily-tui espera duas contas himalaya chamadas `work` e `personal`. A
 autenticação **não usa senha**: o himalaya pede o token ao `ortie`, que faz o
 fluxo OAuth uma vez e guarda o resultado no keyring.
@@ -200,6 +284,9 @@ O script:
 Teste: `himalaya envelope list -a work --page-size 1 -o json` deve sair sem erro.
 
 ### 2. Agenda — Google Cloud (`setup-auth.sh google`)
+
+> Pule se você deixou `panels.agenda = false`. É a autenticação mais chata das
+> cinco: exige um projeto seu no Google Cloud.
 
 A API do Calendar **não** aceita App Password nem o client do Thunderbird:
 você precisa de um OAuth client próprio.
@@ -244,6 +331,8 @@ sair sem erro.
 > nesse caso prefira que cada um traga o próprio client (os 4 passos acima).
 
 ### 3. Tarefas — Microsoft To Do (`setup-auth.sh mstodo`)
+
+> Pule se você deixou `panels.tasks = false`.
 
 Conta pessoal Microsoft, **sem app registration nem client secret**: a
 autenticação usa o client público **first-party da própria Microsoft**
@@ -295,6 +384,8 @@ Teste: `mstodo list` deve sair sem erro.
 
 ### 4. PRs/issues — ghpending (`GITHUB_TOKEN`)
 
+> Pule se você deixou `panels.pulls = false`.
+
 ```sh
 export GITHUB_TOKEN="ghp_xxx"   # PAT com escopo repo; coloque no shell rc
 ghpending add                    # escolhe repos de um usuário/org (interativo)
@@ -304,6 +395,9 @@ ghpending list                   # confere a lista (~/.config/ghpending/config.t
 Teste: `ghpending` deve imprimir o digest colorido.
 
 ### 5. Jira — jira (variáveis de ambiente)
+
+> Pule se você deixou `panels.jira = false`. O `cloud` e o `email` podem vir do
+> config em vez do ambiente; só o token é obrigatoriamente variável.
 
 ```sh
 export JIRA_EMAIL="voce@suaempresa.com"
@@ -346,26 +440,14 @@ Teste: `jira issues` deve listar suas issues em JSON.
 
 ## Ajustando o daily-tui ao seu perfil
 
-**E-mails da agenda — por variável de ambiente (sem recompilar):**
+Quase tudo vive no [config](#config-painéis-e-contas), sem recompilar nada:
+painéis ligados, nomes e marcadores das contas, e-mail de cada agenda, nome da
+lista do To Do, limite de e-mails por conta e o intervalo de atualização.
 
-```sh
-export DAILY_TUI_PERSONAL_EMAIL="voce@gmail.com"
-export DAILY_TUI_WORK_EMAIL="voce@suaempresa.com"
-```
-
-São os e-mails usados no filtro `--calendar` do gcalcli. Sem eles, a agenda usa um
-placeholder e não acha seus eventos. (Ficam em
-[`scripts/daily-tui.env.example`](scripts/daily-tui.env.example).)
-
-**Nomes das contas — fixos em código** (`work`/`personal`), em
-[`src/data/mod.rs`](src/data/mod.rs). Só precisa mexer se quiser outros nomes;
-recompile depois com `./scripts/install.sh --skip-system --skip-clis`:
-
-- `himalaya_name` — precisa bater com os nomes em `himalaya account configure`;
-- `gcalcli_dir` — subdiretório de cada conta sob `~/.local/share/gcalcli-accounts`.
-
-Os helpers `jira` e `mstodo` já são configuráveis por variáveis de ambiente
-(não exigem editar código).
+As variáveis `DAILY_TUI_PERSONAL_EMAIL` / `DAILY_TUI_WORK_EMAIL` continuam
+valendo como alternativa ao campo `email` das contas — é como isso funcionava
+antes do config existir, e quem já as exporta não precisa mudar nada. O config
+ganha delas quando os dois estão preenchidos.
 
 ---
 
@@ -560,4 +642,6 @@ Primeiro recurso, sempre: **`./scripts/setup-auth.sh check`** — ele aponta qua
 | `mstodo: sem credenciais — rode: mstodo auth`    | falta autorizar; rode `mstodo auth` (ou `setup-auth.sh mstodo`; no Windows, `scripts\google-auth.cmd`). |
 | `client secret não encontrado`                   | baixe o OAuth client (Google Cloud) e rode `setup-auth.sh google`.                   |
 | Erro de compilação por OpenSSL                   | falta `libssl-dev`/`openssl-devel` — rode o `install.sh` sem `--skip-system`.        |
+| `config inválido: …` ao abrir | erro de digitação no config. A mensagem nomeia o campo; `daily-tui --print-config` mostra o que ele entendeu. |
+| Painel que você quer não aparece | ele está `false` no `[panels]`. Confira com `daily-tui --print-config`. |
 | `banco indisponível: …` na central de notificações | o SQLite não abriu (permissão, disco cheio). O painel segue funcionando, só sem memória entre execuções. |

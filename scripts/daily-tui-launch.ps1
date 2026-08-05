@@ -81,4 +81,6 @@ if ($gh)   { $env:GITHUB_TOKEN = $gh }
 
 # --- lanca o binario (release) ----------------------------------------------
 $exe = Join-Path $PSScriptRoot '..\target\release\daily-tui.exe'
-& $exe
+# Repassa os argumentos: e o que faz `daily-tui --init` e `--print-config`
+# funcionarem por este launcher, em vez de abrirem a TUI ignorando a flag.
+& $exe @args
