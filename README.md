@@ -17,6 +17,12 @@ Os dados atualizam sozinhos a cada 5 minutos (ou na hora, com `r`).
 aparece, não recebe foco e não busca nada — e você não precisa autenticar a
 ferramenta dele.
 
+> **Sistemas:** Linux, macOS e Windows. O que muda por sistema é onde ficam os
+> arquivos (config, banco, tokens) e como o e-mail guarda a credencial — no
+> Linux via keyring do freedesktop (`ortie` + `secret-tool`), no macOS pelo
+> Keychain e no Windows pelo Credential Manager, os dois últimos direto pelo
+> himalaya. As seções de autenticação dizem o que cada um pede.
+
 > **Como funciona por baixo:** o daily-tui **não fala** com Gmail/Google/Jira/GitHub
 > diretamente. Ele só executa CLIs já instaladas e autenticadas na sua máquina e
 > formata a saída delas. Por isso a maior parte da configuração é *configurar e
@@ -252,6 +258,11 @@ GitHub e Jira são só variáveis de ambiente (seções 4 e 5 abaixo).
 ### 1. E-mail — ortie + himalaya (`setup-auth.sh email`)
 
 > Pule se você deixou `panels.email = false`.
+
+> **macOS e Windows:** o `ortie` e o `secret-tool` são do fluxo Linux (keyring do
+> freedesktop). Nesses dois sistemas o himalaya faz o OAuth2 sozinho e guarda o
+> token no keychain do sistema — use `himalaya account configure <conta>` e pule
+> a parte do `ortie`.
 
 O daily-tui espera duas contas himalaya chamadas `work` e `personal`. A
 autenticação **não usa senha**: o himalaya pede o token ao `ortie`, que faz o

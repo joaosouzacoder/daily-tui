@@ -18,14 +18,15 @@ pub use tasks::TaskItem;
 /// `cmd /C`. As CLIs `.exe` (himalaya/gcalcli/ghpending) chamam direto e não
 /// passam por aqui. No Unix é sempre exec direto.
 pub fn helper_command(program: &str) -> std::process::Command {
-    #[cfg(windows)]
-    let mut cmd = {
+    // `cfg!` em vez de `#[cfg]`: os dois ramos compilam em toda plataforma, e o
+    // build no Windows checa também o caminho Unix.
+    let mut cmd = if cfg!(windows) {
         let mut cmd = std::process::Command::new("cmd");
         cmd.arg("/C").arg(program);
         cmd
+    } else {
+        std::process::Command::new(program)
     };
-    #[cfg(not(windows))]
-    let mut cmd = std::process::Command::new(program);
     helper_env(&mut cmd, program);
     cmd
 }

@@ -89,7 +89,9 @@ install_system_deps() {
       $SUDO apk add --no-cache curl git jq build-base openssl-dev pkgconf \
         libsecret gnome-keyring ;;
     brew)
-      brew install jq openssl@3 pkg-config libsecret ;;
+      # Sem libsecret: no macOS o keyring é o Keychain, e o himalaya fala com
+      # ele direto pelo crate `keyring`.
+      brew install jq openssl@3 pkg-config ;;
     *)
       warn "gerenciador não reconhecido — instale: curl git jq, toolchain C, openssl-dev, pkg-config, libsecret (secret-tool) + um keyring (gnome-keyring/kwallet)" ;;
   esac

@@ -24,15 +24,18 @@ pub struct Store {
 /// Onde o banco vive: no diretório de dados do usuário, ao lado do que as
 /// outras ferramentas guardam.
 pub fn default_path() -> PathBuf {
-    #[cfg(windows)]
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    #[cfg(not(windows))]
-    let base = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|_| PathBuf::from("."));
+    // `cfg!` em vez de `#[cfg]`: assim o compilador checa os dois ramos em
+    // qualquer plataforma (ver a nota em `config::default_path`).
+    let base = if cfg!(windows) {
+        std::env::var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .unwrap_or_else(|_| PathBuf::from("."))
+    };
     base.join("daily-tui").join("daily-tui.db")
 }
 

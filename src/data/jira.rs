@@ -223,15 +223,31 @@ fn run(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Programa que abre URL em cada sistema.
+///
+/// Compilado em toda plataforma (é `cfg!`, não `#[cfg]`), então o build no
+/// Windows também checa a escolha do Unix. O `xdg-open` é do freedesktop e
+/// **não existe no macOS**, onde o equivalente é o `open`.
+fn browser_program() -> &'static str {
+    if cfg!(windows) {
+        "cmd"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    }
+}
+
 /// Abre uma URL no navegador do sistema.
 ///
 /// No Windows via `cmd /C start ""` — o primeiro argumento vazio é o título da
-/// janela, sem ele o `start` interpreta a URL como título. No Unix, `xdg-open`.
+/// janela, sem ele o `start` interpreta a URL como título. Fora dele, o
+/// programa vem de `browser_program` e recebe a URL como argumento.
 pub fn open_url(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     let mut cmd = {
         use std::os::windows::process::CommandExt;
-        let mut c = std::process::Command::new("cmd");
+        let mut c = std::process::Command::new(browser_program());
         // `Command::args` só citaria a URL se ela tivesse espaço ou aspas —
         // mas quem lê essa linha é o `cmd.exe`, que a retokeniza com sua
         // própria gramática, onde `&`, `|` e `^` são separadores/escapes, não
@@ -245,7 +261,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
     };
     #[cfg(not(windows))]
     let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
+        let mut c = std::process::Command::new(browser_program());
         c.arg(url);
         c
     };
@@ -345,6 +361,20 @@ mod tests {
         let items = parse_issues(REAL).unwrap();
         assert_eq!(items[0].kind, "História");
         assert_eq!(items[1].kind, "", "ausente no JSON não é erro");
+    }
+
+    #[test]
+    fn the_browser_program_matches_the_platform() {
+        // `xdg-open` é do freedesktop: no macOS ele não existe, e usá-lo daria
+        // "falha ao abrir o navegador" em toda issue aberta com Enter.
+        let expected = if cfg!(windows) {
+            "cmd"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        assert_eq!(browser_program(), expected);
     }
 
     #[test]

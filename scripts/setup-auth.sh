@@ -85,7 +85,10 @@ skip_or() {  # nome, ligado?
 doctor() {
   step "Diagnóstico das autenticações (painéis do daily-tui)"
   echo "    CLIs no PATH:"
-  for c in himalaya gcalcli ghpending jira mstodo ortie secret-tool jq; do
+  # `ortie` e `secret-tool` são do fluxo de e-mail no Linux (libsecret). No
+  # macOS e no Windows o himalaya guarda o token no keychain do sistema, e a
+  # ausência deles não é problema.
+  for c in himalaya gcalcli ghpending jira mstodo jq; do
     have "$c" && printf "      ${G}✓${X} %s\n" "$c" || printf "      ${R}✗${X} %s (ausente)\n" "$c"
   done
   echo

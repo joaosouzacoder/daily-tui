@@ -246,15 +246,20 @@ impl Config {
 
 /// Onde o config vive quando ninguém passa `--config`.
 pub fn default_path() -> PathBuf {
-    #[cfg(windows)]
-    let base = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    #[cfg(not(windows))]
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|_| PathBuf::from("."));
+    // `cfg!` em vez de `#[cfg]`: os dois ramos são compilados em toda
+    // plataforma, então o build no Windows também checa o caminho Unix. Com
+    // `#[cfg]`, o lado inativo nunca passa pelo compilador — e foi assim que
+    // este arquivo nasceu sem nunca ter sido verificado no Linux.
+    let base = if cfg!(windows) {
+        std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        std::env::var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|_| PathBuf::from("."))
+    };
     base.join("daily-tui").join("config.toml")
 }
 
