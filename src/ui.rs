@@ -370,10 +370,13 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) ->
     } else {
         priority.chars().count() + 1
     };
+    // A hora, quando existe, ocupa " HH:MM".
+    let time_w = if t.time.is_empty() { 0 } else { 6 };
     let title_w = room_for(
         avail,
         6 + priority_w
             + if t.due.is_empty() { 0 } else { 7 }
+            + time_w
             + t.recur.marker().chars().count(),
     );
     let mut spans = if t.completed {
@@ -398,6 +401,9 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) ->
     if !t.due.is_empty() {
         spans.push(theme.muted("  "));
         spans.push(theme.accent(short_date(&t.due)));
+    }
+    if !t.time.is_empty() {
+        spans.push(theme.accent(format!(" {}", t.time)));
     }
     if !t.recur.marker().is_empty() {
         spans.push(theme.muted(t.recur.marker()));
@@ -1310,6 +1316,7 @@ mod tests {
             due: String::new(),
             notes: String::new(),
             subtasks: Vec::new(),
+            time: String::new(),
             priority: Default::default(),
             recur: Default::default(),
         }
@@ -1319,8 +1326,8 @@ mod tests {
     fn tasks_panel_renders_checkbox_and_titles() {
         let mut app = test_app();
         app.tasks.items = vec![
-            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new(), subtasks: Vec::new(), priority: Default::default(), recur: Default::default() },
-            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new(), subtasks: Vec::new(), priority: Default::default(), recur: Default::default() },
+            TaskItem { id: "1".into(), title: "Comprar café".into(), completed: false, due: "2026-06-10".into(), notes: String::new(), subtasks: Vec::new(), time: String::new(), priority: Default::default(), recur: Default::default() },
+            TaskItem { id: "2".into(), title: "Já feito".into(), completed: true, due: String::new(), notes: String::new(), subtasks: Vec::new(), time: String::new(), priority: Default::default(), recur: Default::default() },
         ];
         app.tasks.loaded = true;
         let out = render_to_string(&app, 120, 30);

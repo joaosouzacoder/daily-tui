@@ -15,7 +15,8 @@ Subcomandos:
   mstodo complete <id>
   mstodo reopen <id>
   mstodo edit <id> ["<título>"] [--title T] [--due AAAA-MM-DD|none]
-                   [--recur none|daily|weekly|monthly] [--priority low|normal|high]
+                   [--time HH:MM|none] [--recur none|daily|weekly|monthly]
+                   [--priority low|normal|high]
   mstodo delete <id>
   mstodo subtask <tarefa> "<título>"          # cria uma etapa
   mstodo subtask-edit <tarefa> <item> "<t>"   # renomeia a etapa
@@ -34,7 +35,7 @@ resumo (ver `stderr_summary` em src/data/mod.rs), então traceback não ajuda.
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from functools import cache
 from pathlib import Path
 
@@ -195,6 +196,9 @@ def to_item(task):
         "due": due,
         # `importance` do Graph: low/normal/high.
         "priority": task.get("importance") or "normal",
+        # Hora, em hora local. O To Do zera a hora do vencimento (data é data);
+        # quem guarda hora é o lembrete, que é o "Lembrar-me" do app.
+        "time": local_time(task) if task.get("isReminderOn") else "",
         # Só o tipo do padrão interessa ao painel (daily/weekly/monthly); o
         # intervalo e os dias vivem no Graph e são derivados da data.
         "recur": (((task.get("recurrence") or {}).get("pattern") or {}).get("type") or ""),
@@ -210,6 +214,20 @@ def to_item(task):
             for item in (task.get("checklistItems") or [])
         ],
     }
+
+
+def local_time(task):
+    """`HH:MM` local do lembrete, ou vazio."""
+    raw = ((task.get("reminderDateTime") or {}).get("dateTime") or "")[:19]
+    if not raw:
+        return ""
+    # O Graph devolve o lembrete em UTC; quem lê a lista pensa em hora local.
+    return (
+        datetime.fromisoformat(raw)
+        .replace(tzinfo=timezone.utc)
+        .astimezone()
+        .strftime("%H:%M")
+    )
 
 
 def do_list():
@@ -280,7 +298,21 @@ def current_due(tid):
     return date.fromisoformat(raw) if raw else None
 
 
-def do_edit(tid, title=None, due=None, recur=None, priority=None):
+def reminder_body(day, hhmm):
+    """Corpo do `reminderDateTime` para a data e a hora local dadas.
+
+    Convertido para UTC com o fuso do sistema: mandar a hora local sob
+    `timeZone: UTC` faria o lembrete tocar deslocado.
+    """
+    try:
+        local = datetime.fromisoformat(f"{day.isoformat()}T{hhmm}")
+    except ValueError:
+        die(f"hora inválida: {hhmm} — use HH:MM")
+    utc = local.astimezone().astimezone(timezone.utc)
+    return {"dateTime": utc.strftime("%Y-%m-%dT%H:%M:%S.0000000"), "timeZone": "UTC"}
+
+
+def do_edit(tid, title=None, due=None, time=None, recur=None, priority=None):
     body = {}
     if title is not None:
         body["title"] = title
@@ -303,6 +335,17 @@ def do_edit(tid, title=None, due=None, recur=None, priority=None):
         # quando a tarefa já tem uma: "The property 'dueDateTime' is required
         # when updating/creating Recurrence in the task entity".
         body.setdefault("dueDateTime", due_body(anchor.isoformat()))
+    if time == "none":
+        body["isReminderOn"] = False
+        body["reminderDateTime"] = None
+    elif time is not None:
+        if due == "none":
+            die("hora exige data de vencimento")
+        day = date.fromisoformat(due) if due else current_due(tid)
+        if day is None:
+            die("hora exige data de vencimento")
+        body["isReminderOn"] = True
+        body["reminderDateTime"] = reminder_body(day, time)
     if not body:
         die("nada para mudar")
     in_list("PATCH", f"/{tid}", json=body)
@@ -344,8 +387,8 @@ def edit_flags(args):
         out["title"] = rest.pop(0)
     while rest:
         flag = rest.pop(0)
-        name = {"--title": "title", "--due": "due", "--recur": "recur",
-                "--priority": "priority"}.get(flag)
+        name = {"--title": "title", "--due": "due", "--time": "time",
+                "--recur": "recur", "--priority": "priority"}.get(flag)
         if name is None:
             die(f"flag desconhecida em edit: {flag}")
         if not rest:

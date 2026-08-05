@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 use serde::{Deserialize, Deserializer};
 
 /// Uma subtarefa: `checklistItem` no Graph, "etapa" na interface do To Do.
@@ -55,6 +55,15 @@ impl Priority {
             Priority::Low => "",
             Priority::Normal => "!",
             Priority::High => "!!!",
+        }
+    }
+
+    /// Posição na ordenação: alta primeiro.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Priority::High => 0,
+            Priority::Normal => 1,
+            Priority::Low => 2,
         }
     }
 
@@ -199,30 +208,55 @@ pub fn group_of(due: &str, today: NaiveDate) -> TaskGroup {
     }
 }
 
+/// Vencimento digitado: o dia e, quando informada, a hora.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Due {
+    pub date: NaiveDate,
+    /// Hora local. `None` quando a tarefa vence "no dia", sem hora marcada.
+    pub time: Option<NaiveTime>,
+}
+
 /// Interpreta o que foi digitado no campo de vencimento.
 ///
-/// Aceita `AAAA-MM-DD`, `hoje`, `amanhã` e `+Nd`; vazio limpa a data. Digitar a
-/// data inteira é o caso raro — o comum é "hoje" ou "daqui a três dias".
-pub fn parse_due(input: &str, today: NaiveDate) -> Result<Option<NaiveDate>, String> {
+/// Aceita `AAAA-MM-DD`, `hoje`, `amanhã` e `+Nd`, cada um com uma hora opcional
+/// no fim (`hoje 14:30`); vazio limpa a data. Digitar a data inteira é o caso
+/// raro — o comum é "hoje" ou "daqui a três dias".
+pub fn parse_due(input: &str, today: NaiveDate) -> Result<Option<Due>, String> {
     let raw = input.trim().to_lowercase();
     if raw.is_empty() {
         return Ok(None);
     }
-    if raw == "hoje" {
-        return Ok(Some(today));
+    // A hora, quando existe, é o último pedaço e tem `:` — é o que a separa de
+    // `+3d` e de `2026-08-07` sem ambiguidade.
+    let (day_part, time) = match raw.rsplit_once(char::is_whitespace) {
+        Some((day, last)) if last.contains(':') => {
+            let time = NaiveTime::parse_from_str(last, "%H:%M")
+                .map_err(|_| format!("hora inválida: “{last}” — use HH:MM"))?;
+            (day.trim().to_string(), Some(time))
+        }
+        _ => (raw.clone(), None),
+    };
+    let date = parse_day(&day_part, today, input)?;
+    Ok(Some(Due { date, time }))
+}
+
+/// A parte do dia do campo de vencimento.
+fn parse_day(day: &str, today: NaiveDate, whole: &str) -> Result<NaiveDate, String> {
+    if day == "hoje" {
+        return Ok(today);
     }
-    if raw == "amanhã" || raw == "amanha" {
-        return Ok(Some(today + chrono::Duration::days(1)));
+    if day == "amanhã" || day == "amanha" {
+        return Ok(today + chrono::Duration::days(1));
     }
-    if let Some(n) = raw.strip_prefix('+').and_then(|r| r.strip_suffix('d')) {
+    if let Some(n) = day.strip_prefix('+').and_then(|r| r.strip_suffix('d')) {
         let days: i64 = n
             .parse()
-            .map_err(|_| format!("não entendi “{input}” — use +3d"))?;
-        return Ok(Some(today + chrono::Duration::days(days)));
+            .map_err(|_| format!("não entendi “{whole}” — use +3d"))?;
+        return Ok(today + chrono::Duration::days(days));
     }
-    NaiveDate::parse_from_str(&raw, "%Y-%m-%d")
-        .map(Some)
-        .map_err(|_| format!("data inválida: “{input}” — use AAAA-MM-DD, hoje, amanhã ou +3d"))
+    NaiveDate::parse_from_str(day, "%Y-%m-%d").map_err(|_| {
+        format!("data inválida: “{whole}” — use AAAA-MM-DD, hoje, amanhã ou +3d (com hora: hoje 14:30)")
+    })
 }
 
 /// Uma linha renderizada do painel: cabeçalho de faixa, tarefa ou subtarefa.
@@ -247,23 +281,30 @@ impl TaskRow {
 /// Achata as tarefas em linhas: cabeçalho da faixa de prazo, as tarefas dela, e
 /// as subtarefas das que estão expandidas.
 ///
-/// Dentro de cada faixa vale a ordem que o `mstodo list` já devolve (pendentes
-/// primeiro, depois por vencimento). Faixa sem tarefa não gera cabeçalho.
+/// Dentro de cada faixa: o que vence antes primeiro e, no mesmo dia, o mais
+/// prioritário; concluídas no fim. Faixa sem tarefa não gera cabeçalho.
 pub fn rows(items: &[TaskItem], expanded: &HashSet<String>, today: NaiveDate) -> Vec<TaskRow> {
     let mut out = Vec::new();
     for group in GROUPS {
-        let mut header_done = false;
-        for (t, item) in items.iter().enumerate() {
-            if group_of(&item.due, today) != group {
-                continue;
-            }
-            if !header_done {
-                out.push(TaskRow::Header(group));
-                header_done = true;
-            }
+        let mut in_group: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| group_of(&item.due, today) == group)
+            .map(|(t, _)| t)
+            .collect();
+        // `sort_by_key` é estável: empate mantém a ordem que o `mstodo` devolveu.
+        in_group.sort_by_key(|&t| {
+            let item = &items[t];
+            (item.completed, item.due.clone(), item.priority.rank())
+        });
+        if in_group.is_empty() {
+            continue;
+        }
+        out.push(TaskRow::Header(group));
+        for t in in_group {
             out.push(TaskRow::Task(t));
-            if expanded.contains(&item.id) {
-                out.extend((0..item.subtasks.len()).map(|sub| TaskRow::Sub { task: t, sub }));
+            if expanded.contains(&items[t].id) {
+                out.extend((0..items[t].subtasks.len()).map(|sub| TaskRow::Sub { task: t, sub }));
             }
         }
     }
@@ -284,6 +325,10 @@ pub struct TaskItem {
     /// Etapas da tarefa; `[]` quando não há. Vêm embutidas no `mstodo list`.
     #[serde(default)]
     pub subtasks: Vec<SubTask>,
+    /// Hora local (`HH:MM`), vazio quando não há. É o lembrete do To Do: o
+    /// vencimento do Graph guarda só a data, e ele zera qualquer hora enviada.
+    #[serde(default)]
+    pub time: String,
     /// Prioridade (`importance` do Graph).
     #[serde(default)]
     pub priority: Priority,
@@ -298,6 +343,8 @@ pub struct TaskEdit {
     pub title: Option<String>,
     /// Já no formato do helper: `AAAA-MM-DD`, ou `none` para limpar.
     pub due: Option<String>,
+    /// `HH:MM`, ou `none` para tirar a hora.
+    pub time: Option<String>,
     pub recur: Option<Recur>,
     pub priority: Option<Priority>,
 }
@@ -307,6 +354,7 @@ impl TaskEdit {
     pub fn is_empty(&self) -> bool {
         self.title.is_none()
             && self.due.is_none()
+            && self.time.is_none()
             && self.recur.is_none()
             && self.priority.is_none()
     }
@@ -326,6 +374,9 @@ pub fn update(id: &str, edit: &TaskEdit) -> Result<(), String> {
     }
     if let Some(due) = &edit.due {
         args.extend(["--due", due]);
+    }
+    if let Some(time) = &edit.time {
+        args.extend(["--time", time]);
     }
     if let Some(recur) = edit.recur {
         args.extend(["--recur", recur.flag()]);
@@ -506,6 +557,48 @@ mod tests {
     }
 
     #[test]
+    fn inside_a_window_the_order_is_date_then_priority() {
+        // Duas datas na mesma faixa e prioridades trocadas de propósito: a
+        // ordem tem de sair da data e do `!`, não da que o helper mandou antes.
+        let raw = r#"[
+          {"id":"a","title":"dia 9, média","completed":false,"due":"2026-08-09"},
+          {"id":"b","title":"dia 6, baixa","completed":false,"due":"2026-08-06","priority":"low"},
+          {"id":"c","title":"dia 9, alta","completed":false,"due":"2026-08-09","priority":"high"},
+          {"id":"d","title":"dia 6, alta","completed":false,"due":"2026-08-06","priority":"high"}
+        ]"#;
+        let tasks = parse_tasks(raw).unwrap();
+        let order: Vec<&str> = rows(&tasks, &HashSet::new(), today())
+            .into_iter()
+            .filter_map(|r| match r {
+                TaskRow::Task(t) => Some(tasks[t].id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, vec!["d", "b", "c", "a"], "dia 6 antes do 9; alta antes");
+    }
+
+    #[test]
+    fn a_finished_task_goes_to_the_end_of_its_window() {
+        let raw = r#"[
+          {"id":"feita","title":"feita","completed":true,"due":"2026-08-04","priority":"high"},
+          {"id":"aberta","title":"aberta","completed":false,"due":"2026-08-04","priority":"low"}
+        ]"#;
+        let tasks = parse_tasks(raw).unwrap();
+        let order: Vec<&str> = rows(&tasks, &HashSet::new(), today())
+            .into_iter()
+            .filter_map(|r| match r {
+                TaskRow::Task(t) => Some(tasks[t].id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec!["aberta", "feita"],
+            "concluída não disputa espaço no topo, mesmo com prioridade alta"
+        );
+    }
+
+    #[test]
     fn the_group_of_a_date_follows_rolling_windows() {
         let t = today();
         assert_eq!(group_of("2026-08-03", t), TaskGroup::Overdue);
@@ -588,28 +681,49 @@ mod tests {
         assert_eq!(Priority::Low.marker(), "", "baixa não pede atenção");
     }
 
+    /// Vencimento sem hora, para comparar nos testes.
+    fn day(y: i32, m: u32, d: u32) -> Result<Option<Due>, String> {
+        Ok(Some(Due {
+            date: NaiveDate::from_ymd_opt(y, m, d).unwrap(),
+            time: None,
+        }))
+    }
+
     #[test]
     fn the_due_field_accepts_shortcuts_and_iso() {
         let t = today();
         assert_eq!(parse_due("", t), Ok(None), "vazio limpa a data");
-        assert_eq!(parse_due("hoje", t), Ok(Some(t)));
+        assert_eq!(parse_due("hoje", t), day(2026, 8, 4));
+        assert_eq!(parse_due("amanhã", t), day(2026, 8, 5));
+        assert_eq!(parse_due("amanha", t), day(2026, 8, 5), "sem acento também");
+        assert_eq!(parse_due("+3d", t), day(2026, 8, 7));
+        assert_eq!(parse_due("2026-12-31", t), day(2026, 12, 31));
+    }
+
+    #[test]
+    fn a_time_can_ride_along_with_any_date_form() {
+        let t = today();
+        let at = |h, m| Some(NaiveTime::from_hms_opt(h, m, 0).unwrap());
+        assert_eq!(parse_due("hoje 14:30", t).unwrap().unwrap().time, at(14, 30));
+        assert_eq!(parse_due("+3d 09:05", t).unwrap().unwrap().time, at(9, 5));
         assert_eq!(
-            parse_due("amanhã", t),
-            Ok(Some(NaiveDate::from_ymd_opt(2026, 8, 5).unwrap()))
+            parse_due("2026-12-31 23:59", t).unwrap().unwrap(),
+            Due {
+                date: NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
+                time: at(23, 59),
+            }
         );
         assert_eq!(
-            parse_due("amanha", t),
-            Ok(Some(NaiveDate::from_ymd_opt(2026, 8, 5).unwrap())),
-            "sem acento também"
+            parse_due("hoje", t).unwrap().unwrap().time,
+            None,
+            "sem hora continua sendo o padrão"
         );
-        assert_eq!(
-            parse_due("+3d", t),
-            Ok(Some(NaiveDate::from_ymd_opt(2026, 8, 7).unwrap()))
-        );
-        assert_eq!(
-            parse_due("2026-12-31", t),
-            Ok(Some(NaiveDate::from_ymd_opt(2026, 12, 31).unwrap()))
-        );
+    }
+
+    #[test]
+    fn an_impossible_time_is_rejected_by_the_field() {
+        let err = parse_due("hoje 25:99", today()).unwrap_err();
+        assert!(err.contains("HH:MM"), "a mensagem ensina o formato: {err}");
     }
 
     #[test]

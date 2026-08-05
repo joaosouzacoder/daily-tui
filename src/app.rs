@@ -237,43 +237,78 @@ pub struct TaskForm {
     /// Data recusada na confirmação; some quando o campo é corrigido.
     pub error: Option<String>,
     /// Valores de quando o formulário abriu, para gravar só o que mudou.
-    was: (String, String, tasks::Recur, tasks::Priority),
+    was: Was,
+}
+
+/// Estado da tarefa quando o formulário abriu.
+struct Was {
+    title: String,
+    due: String,
+    time: String,
+    recur: tasks::Recur,
+    priority: tasks::Priority,
 }
 
 impl TaskForm {
     fn new(t: &TaskItem) -> Self {
+        // Data e hora dividem um campo: é assim que se digita ("hoje 14:30") e
+        // é assim que a lista mostra.
+        let due = if t.time.is_empty() {
+            t.due.clone()
+        } else {
+            format!("{} {}", t.due, t.time)
+        };
         Self {
             id: t.id.clone(),
             title: t.title.clone(),
-            due: t.due.clone(),
+            due,
             recur: t.recur,
             priority: t.priority,
             field: TaskField::Title,
             error: None,
-            was: (t.title.clone(), t.due.clone(), t.recur, t.priority),
+            was: Was {
+                title: t.title.clone(),
+                due: t.due.clone(),
+                time: t.time.clone(),
+                recur: t.recur,
+                priority: t.priority,
+            },
         }
     }
 
     /// O que mudou, já no formato do helper. `Err` quando a data não faz sentido.
     fn edit(&self, today: chrono::NaiveDate) -> Result<tasks::TaskEdit, String> {
-        let (was_title, was_due, was_recur, was_priority) = &self.was;
+        let was = &self.was;
         let title = self.title.trim().to_string();
         let parsed = tasks::parse_due(&self.due, today)?;
-        // Guarda a data no formato do helper: `none` limpa.
-        let due = match parsed {
-            Some(d) => d.format("%Y-%m-%d").to_string(),
-            None => "none".to_string(),
+        // Formato do helper, onde `none` limpa o campo.
+        let (due, time) = match parsed {
+            Some(d) => (
+                d.date.format("%Y-%m-%d").to_string(),
+                d.time
+                    .map(|t| t.format("%H:%M").to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+            None => ("none".to_string(), "none".to_string()),
         };
-        let due_before = if was_due.is_empty() {
-            "none".to_string()
-        } else {
-            was_due.clone()
+        let blank_as_none = |v: &str| {
+            if v.is_empty() {
+                "none".to_string()
+            } else {
+                v.to_string()
+            }
         };
+        let due_changed = due != blank_as_none(&was.due);
+        let time_changed = time != blank_as_none(&was.time);
+        // Mudar de dia obriga a regravar a hora: o lembrete guarda data e hora
+        // juntas, e sozinho ele ficaria no dia antigo.
+        let send_time = time_changed || (due_changed && time != "none");
         Ok(tasks::TaskEdit {
-            title: (!title.is_empty() && title != *was_title).then_some(title),
-            due: (due != due_before).then_some(due),
-            recur: (self.recur != *was_recur).then_some(self.recur),
-            priority: (self.priority != *was_priority).then_some(self.priority),
+            title: (!title.is_empty() && title != was.title).then_some(title),
+            due: due_changed.then_some(due),
+            time: send_time.then_some(time),
+            recur: (self.recur != was.recur).then_some(self.recur),
+            priority: (self.priority != was.priority).then_some(self.priority),
         })
     }
 }
@@ -2179,6 +2214,7 @@ mod tests {
             subtasks: Vec::new(),
             due: String::new(),
             notes: String::new(),
+            time: String::new(),
             priority: tasks::Priority::Normal,
             recur: tasks::Recur::None,
         }
@@ -2240,13 +2276,14 @@ mod tests {
     #[test]
     fn g_and_shift_g_land_on_actionable_lines_not_on_a_header() {
         let (mut app, rx) = task_app(vec![task("t1", "primeira", false), task("t2", "outra", false)]);
+
         app.update(key(KeyCode::Char('g')));
         assert_eq!(app.tasks.cursor, row_of_task(&app, 0), "g pula o cabeçalho");
-        app.update(key(KeyCode::Char(' ')));
-        assert!(rx.try_recv().is_ok(), "e a linha responde a Espaço");
-
         app.update(key(KeyCode::Char('G')));
-        assert_eq!(app.tasks.cursor, row_of_task(&app, 1));
+        assert_eq!(app.tasks.cursor, row_of_task(&app, 1), "G para na última tarefa");
+
+        // E a linha em que pararam responde às teclas de ação (era o sintoma:
+        // cursor no cabeçalho deixava `Espaço` sem alvo).
         app.update(key(KeyCode::Char(' ')));
         assert!(rx.try_recv().is_ok());
     }
@@ -2316,6 +2353,91 @@ mod tests {
         let hoje = app.now.date_naive().format("%Y-%m-%d").to_string();
         match rx.try_recv().unwrap() {
             WorkerCmd::TaskUpdate { edit, .. } => assert_eq!(edit.due, Some(hoje)),
+            _ => panic!("esperava TaskUpdate"),
+        }
+    }
+
+    #[test]
+    fn the_form_field_carries_the_time_and_writes_it_back() {
+        let mut t9 = task("t9", "reunião", false);
+        t9.due = "2026-08-20".into();
+        t9.time = "09:00".into();
+        let (mut app, rx) = task_app(vec![t9]);
+
+        app.update(key(KeyCode::Char('e')));
+        match &app.prompt {
+            Some(Prompt::EditTask(form)) => {
+                assert_eq!(form.due, "2026-08-20 09:00", "data e hora no mesmo campo")
+            }
+            _ => panic!("esperava o formulário"),
+        }
+        // Troca 09:00 por 14:30.
+        app.update(key(KeyCode::Tab));
+        for _ in 0..5 {
+            app.update(key(KeyCode::Backspace));
+        }
+        for c in "14:30".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskUpdate { edit, .. } => {
+                assert_eq!(edit.time.as_deref(), Some("14:30"));
+                assert_eq!(edit.due, None, "o dia não mudou");
+            }
+            _ => panic!("esperava TaskUpdate"),
+        }
+    }
+
+    #[test]
+    fn changing_the_day_rewrites_the_time_so_the_reminder_moves_with_it() {
+        // O lembrete do To Do guarda data e hora juntas: gravar só a data
+        // deixaria o alarme no dia antigo.
+        let mut t9 = task("t9", "reunião", false);
+        t9.due = "2026-08-20".into();
+        t9.time = "09:00".into();
+        let (mut app, rx) = task_app(vec![t9]);
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::Tab)); // vencimento
+        for _ in 0..16 {
+            app.update(key(KeyCode::Backspace));
+        }
+        for c in "2026-08-21 09:00".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskUpdate { edit, .. } => {
+                assert_eq!(edit.due.as_deref(), Some("2026-08-21"));
+                assert_eq!(
+                    edit.time.as_deref(),
+                    Some("09:00"),
+                    "a hora vai junto mesmo sem ter mudado"
+                );
+            }
+            _ => panic!("esperava TaskUpdate"),
+        }
+    }
+
+    #[test]
+    fn dropping_the_time_from_the_field_removes_it() {
+        let mut t9 = task("t9", "reunião", false);
+        t9.due = "2026-08-20".into();
+        t9.time = "09:00".into();
+        let (mut app, rx) = task_app(vec![t9]);
+
+        app.update(key(KeyCode::Char('e')));
+        app.update(key(KeyCode::Tab));
+        for _ in 0..6 {
+            app.update(key(KeyCode::Backspace)); // sai " 09:00"
+        }
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::TaskUpdate { edit, .. } => {
+                assert_eq!(edit.time.as_deref(), Some("none"));
+                assert_eq!(edit.due, None, "o dia fica");
+            }
             _ => panic!("esperava TaskUpdate"),
         }
     }

@@ -445,7 +445,8 @@ subtarefas.
 
 A lista é agrupada por prazo — **ATRASADAS**, **HOJE**, **ESTA SEMANA**,
 **ESTE MÊS**, **DEPOIS**, **SEM DATA** —, e é essa a ordem de prioridade: o que
-passou da data primeiro, o que não tem data no fim. As janelas são móveis (7 e 30
+passou da data primeiro, o que não tem data no fim. Dentro de cada faixa, o que
+vence antes vem primeiro e, no mesmo dia, o mais prioritário; concluídas no fim. As janelas são móveis (7 e 30
 dias a partir de hoje), não o calendário: numa sexta, "esta semana" pelo
 calendário mostraria dois dias e jogaria o resto para o mês. Faixa vazia não
 aparece, e o cursor pula os cabeçalhos.
@@ -459,9 +460,17 @@ campos, texto se digita, e `Espaço`/`←`/`→` circulam repetição
 (nenhuma → diária → semanal → mensal) e prioridade (média → alta → baixa).
 `Enter` grava tudo numa chamada só; `Esc` cancela.
 
-No campo de vencimento vale `AAAA-MM-DD`, `hoje`, `amanhã` e `+3d`; **vazio
-limpa a data**. Data que não dá para entender não fecha o formulário — ele volta
-com o motivo no lugar da linha de ajuda, sem perder o que você digitou.
+No campo de vencimento vale `AAAA-MM-DD`, `hoje`, `amanhã` e `+3d`, cada um com
+uma **hora opcional no fim** (`hoje 14:30`, `2026-08-20 09:00`); **vazio limpa a
+data**. Apagar só a hora tira a hora e mantém o dia. Data ou hora que não dá para
+entender não fecha o formulário — ele volta com o motivo no lugar da linha de
+ajuda, sem perder o que você digitou.
+
+> A hora é o **lembrete** do To Do, não o vencimento: o Graph zera qualquer hora
+> enviada no vencimento (data é data) e guarda hora só no `reminderDateTime` —
+> que é o "Lembrar-me" do app, então o alarme no celular também toca. Ela é
+> convertida com o fuso da sua máquina, e mudar o dia regrava a hora junto: o
+> lembrete guarda data e hora numa coisa só e ficaria no dia antigo.
 
 > Repetição exige data: o Graph recusa recorrência sem vencimento e pede a data
 > no mesmo pedido, então o formulário manda as duas juntas. Uma tarefa que repete
