@@ -456,6 +456,7 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
             let title = match kind {
                 InputKind::AddTask => " Nova tarefa ".to_string(),
                 InputKind::EditTask { .. } => " Editar tarefa ".to_string(),
+                InputKind::AddSubtask { .. } => " Nova subtarefa ".to_string(),
             };
             let input = Line::from(vec![theme.span(buffer.clone()), theme.accent("█")]);
             let help = Line::from(theme.muted("Enter: salvar · Esc: cancelar"));
@@ -695,7 +696,7 @@ fn panel_hints(focus: Panel) -> &'static str {
     match focus {
         Panel::Email => "shift+↑↓ marca · x alterna · espaço lido · m move · d exclui",
         Panel::Jira => "f filtro · p por-pai · esc volta",
-        Panel::Tasks => "enter expande · espaço alterna · a nova · e edita · d apaga",
+        Panel::Tasks => "enter expande · espaço alterna · a nova · A subtarefa · e edita · d apaga",
         _ => "",
     }
 }
@@ -711,14 +712,6 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
         theme.help_line([("j/k", "rolar"), ("Esc", "voltar")])
     } else if app.prompt.is_some() {
         theme.help_line([("Enter/y", "confirmar"), ("Esc/n", "cancelar")])
-    } else if app.focus == Panel::Tasks {
-        theme.help_line([
-            ("Espaço", "concluir"),
-            ("a", "nova"),
-            ("e", "editar"),
-            ("d", "apagar"),
-            ("Tab", "painel"),
-        ])
     } else {
         let hints = panel_hints(app.focus);
         let globals: &[(&str, &str)] = if hints.is_empty() {
@@ -1125,6 +1118,18 @@ mod tests {
         }
         // Na larga, as dicas do painel cabem junto.
         assert!(render_to_string(&app, 160, 30).contains("marca"));
+    }
+
+    #[test]
+    fn the_tasks_footer_shows_its_own_keys_including_the_subtask_one() {
+        // O painel de Tarefas tinha um rodapé próprio, fora do caminho que
+        // encurta por largura — e por isso ignorava as dicas declaradas nele.
+        let mut app = test_app();
+        app.focus = Panel::Tasks;
+        let out = render_to_string(&app, 160, 30);
+        assert!(out.contains("A subtarefa"), "a tecla nova aparece");
+        assert!(out.contains("expande"), "e as que já existiam também");
+        assert!(out.contains("sair"));
     }
 
     #[test]

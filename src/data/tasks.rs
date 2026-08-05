@@ -85,6 +85,11 @@ pub fn edit(id: &str, title: &str) -> Result<(), String> {
     run(&["edit", id, title]).map(|_| ())
 }
 
+/// Cria uma subtarefa na tarefa dada.
+pub fn add_subtask(task_id: &str, title: &str) -> Result<(), String> {
+    run(&["subtask", task_id, title]).map(|_| ())
+}
+
 /// Marca uma subtarefa como concluída.
 pub fn check(task_id: &str, item_id: &str) -> Result<(), String> {
     run(&["check", task_id, item_id]).map(|_| ())

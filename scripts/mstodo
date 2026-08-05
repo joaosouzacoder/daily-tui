@@ -236,6 +236,11 @@ def do_edit(tid, title):
     in_list("PATCH", f"/{tid}", json={"title": title})
 
 
+def do_subtask(task_id, title):
+    """Cria uma subtarefa (checklistItem) na tarefa dada."""
+    in_list("POST", f"/{task_id}/checklistItems", json={"displayName": title})
+
+
 def do_check(task_id, item_id, checked):
     """Marca ou desmarca uma subtarefa (checklistItem) da tarefa dada."""
     in_list("PATCH", f"/{task_id}/checklistItems/{item_id}", json={"isChecked": checked})
@@ -248,7 +253,10 @@ def do_delete(tid):
 def main():
     args = sys.argv[1:]
     if not args:
-        die("uso: mstodo {auth|list|add|complete|reopen|edit|delete}")
+        die(
+            "uso: mstodo {auth|list|add|complete|reopen|edit|delete"
+            "|subtask|check|uncheck}"
+        )
     cmd, rest = args[0], args[1:]
     if cmd == "auth":
         do_auth()
@@ -264,6 +272,8 @@ def main():
         do_edit(rest[0], rest[1])
     elif cmd == "delete":
         do_delete(rest[0])
+    elif cmd == "subtask":
+        do_subtask(rest[0], rest[1])
     elif cmd == "check":
         do_check(rest[0], rest[1], True)
     elif cmd == "uncheck":

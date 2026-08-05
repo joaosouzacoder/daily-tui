@@ -439,8 +439,14 @@ o corpo passa intacto.
 As escritas aparecem na tela **na hora** e a re-busca reconcilia depois. Se a
 escrita falhar, o erro aparece no painel e a lista volta ao que o servidor diz.
 
-No painel **Tarefas**: `Espaço` conclui/reabre · `a` cria · `e` edita · `d` apaga
-(confirma com `y`/`n`) · `Enter` expande/recolhe as subtarefas.
+No painel **Tarefas**: `Espaço` conclui/reabre · `a` cria · `A` cria subtarefa ·
+`e` edita · `d` apaga (confirma com `y`/`n`) · `Enter` expande/recolhe as
+subtarefas.
+
+`A` cria a subtarefa na tarefa da linha onde você está — inclusive quando o
+cursor já está sobre uma subtarefa, aí a nova entra como irmã dela. A mãe abre
+sozinha, senão a subtarefa nova chegaria escondida numa tarefa recolhida. `e` e
+`d` valem só na linha da tarefa: subtarefa não tem edição nem exclusão própria.
 
 Subtarefa no Microsoft To Do é o que o app chama de **etapa** (`checklistItem` no
 Graph) — quem procurar "subtarefa" na interface da Microsoft não acha. Uma tarefa

@@ -145,6 +145,8 @@ pub enum InputKind {
     AddTask,
     /// Editar o título da tarefa com este id.
     EditTask { id: String },
+    /// Criar uma subtarefa na tarefa com este id.
+    AddSubtask { task_id: String },
 }
 
 /// Overlay modal de interação com tarefas (entrada de texto ou confirmação).
@@ -688,9 +690,28 @@ impl App {
         }
     }
 
-    /// Tarefa atualmente selecionada no painel de tarefas.
+    /// Tarefa a que a linha sob o cursor pertence.
+    ///
+    /// O cursor anda por *linhas*, e com uma tarefa expandida as subtarefas
+    /// entram na contagem — indexar `items` pelo cursor apontava para outra
+    /// tarefa. `Sub` devolve a tarefa mãe: criar subtarefa a partir de uma irmã
+    /// é o que se espera.
+    fn cursor_task(&self) -> Option<&TaskItem> {
+        match self.selected_row()? {
+            tasks::TaskRow::Task(t) | tasks::TaskRow::Sub { task: t, .. } => {
+                self.tasks.items.get(t)
+            }
+        }
+    }
+
+    /// Tarefa sob o cursor, e só quando a linha é a dela — `None` numa linha de
+    /// subtarefa. Editar e apagar valem para a tarefa; a subtarefa não tem essas
+    /// ações, e agir na mãe sem o usuário pedir apagaria a tarefa inteira.
     fn selected_task(&self) -> Option<&TaskItem> {
-        self.tasks.items.get(self.tasks.cursor)
+        match self.selected_row()? {
+            tasks::TaskRow::Task(t) => self.tasks.items.get(t),
+            tasks::TaskRow::Sub { .. } => None,
+        }
     }
 
     /// Alterna a tarefa selecionada entre concluída e pendente.
@@ -773,6 +794,18 @@ impl App {
         });
     }
 
+    /// Abre o prompt de criação de subtarefa na tarefa da linha sob o cursor.
+    fn open_add_subtask(&mut self) {
+        if let Some(t) = self.cursor_task() {
+            self.prompt = Some(Prompt::Input {
+                kind: InputKind::AddSubtask {
+                    task_id: t.id.clone(),
+                },
+                buffer: String::new(),
+            });
+        }
+    }
+
     /// Abre o prompt de edição com o título atual da tarefa selecionada.
     fn open_edit_task(&mut self) {
         if let Some(t) = self.selected_task() {
@@ -840,6 +873,12 @@ impl App {
                 match kind {
                     InputKind::AddTask => WorkerCmd::TaskAdd(title),
                     InputKind::EditTask { id } => WorkerCmd::TaskEdit { id, title },
+                    InputKind::AddSubtask { task_id } => {
+                        // Expande a mãe: a subtarefa nova chega com a re-busca e
+                        // ficaria escondida numa tarefa recolhida.
+                        self.tasks_expanded.insert(task_id.clone());
+                        WorkerCmd::SubTaskAdd { task_id, title }
+                    }
                 }
             }
             Some(Prompt::ConfirmDelete { id, .. }) => WorkerCmd::TaskDelete(id),
@@ -902,6 +941,7 @@ impl App {
             KeyCode::Char('d') if self.focus == Panel::Email => self.open_delete_email(),
             KeyCode::Char(' ') if self.focus == Panel::Tasks => self.toggle_task(),
             KeyCode::Char('a') if self.focus == Panel::Tasks => self.open_add_task(),
+            KeyCode::Char('A') if self.focus == Panel::Tasks => self.open_add_subtask(),
             KeyCode::Char('e') if self.focus == Panel::Tasks => self.open_edit_task(),
             KeyCode::Char('d') if self.focus == Panel::Tasks => self.open_delete_task(),
             // Ação do painel de Jira: circula o filtro e recarrega.
@@ -1153,6 +1193,72 @@ mod tests {
         assert_eq!(app.tasks.cursor, 2, "e não passa dela");
         app.update(key(KeyCode::Char('G')));
         assert_eq!(app.tasks.cursor, 2, "G vai para a última linha, não a última tarefa");
+    }
+
+    #[test]
+    fn shift_a_creates_a_subtask_in_the_task_under_the_cursor() {
+        let (mut app, rx) = task_app(vec![task("t1", "sozinha", false)]);
+        app.update(key(KeyCode::Char('A')));
+        match &app.prompt {
+            Some(Prompt::Input {
+                kind: InputKind::AddSubtask { task_id },
+                buffer,
+            }) => {
+                assert_eq!(task_id, "t1");
+                assert!(buffer.is_empty(), "começa em branco");
+            }
+            _ => panic!("esperava prompt de subtarefa"),
+        }
+        for c in "etapa".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::SubTaskAdd { task_id, title } => {
+                assert_eq!(task_id, "t1");
+                assert_eq!(title, "etapa");
+            }
+            _ => panic!("esperava SubTaskAdd"),
+        }
+        assert!(
+            app.tasks_expanded.contains("t1"),
+            "a mãe abre: senão a subtarefa nova chega escondida"
+        );
+    }
+
+    #[test]
+    fn shift_a_on_a_subtask_row_creates_a_sibling_in_the_parent() {
+        let (mut app, rx) = task_app(vec![task("t0", "outra", false), task_with_subs("t1")]);
+        app.tasks.cursor = 1; // t1
+        app.update(key(KeyCode::Enter)); // expande
+        app.update(key(KeyCode::Char('j'))); // primeira subtarefa de t1
+        app.update(key(KeyCode::Char('A')));
+        for c in "irmã".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        match rx.try_recv().unwrap() {
+            WorkerCmd::SubTaskAdd { task_id, title } => {
+                assert_eq!(task_id, "t1", "vai para a mãe, não para a tarefa de índice 1");
+                assert_eq!(title, "irmã");
+            }
+            _ => panic!("esperava SubTaskAdd"),
+        }
+    }
+
+    #[test]
+    fn edit_and_delete_do_not_fire_from_a_subtask_row() {
+        // O cursor anda por linhas: com t1 expandida, indexar as tarefas pelo
+        // cursor apontava para OUTRA tarefa — `d` apagava a errada.
+        let (mut app, rx) = task_app(vec![task_with_subs("t1"), task("t2", "vizinha", false)]);
+        app.update(key(KeyCode::Enter)); // expande t1
+        app.update(key(KeyCode::Char('j'))); // primeira subtarefa
+
+        app.update(key(KeyCode::Char('e')));
+        assert!(app.prompt.is_none(), "subtarefa não tem edição de título");
+        app.update(key(KeyCode::Char('d')));
+        assert!(app.prompt.is_none(), "e muito menos exclusão da tarefa mãe");
+        assert!(rx.try_recv().is_err(), "nenhum comando sai daí");
     }
 
     #[test]

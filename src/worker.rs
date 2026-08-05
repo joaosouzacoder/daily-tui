@@ -56,6 +56,8 @@ pub enum WorkerCmd {
     TaskAdd(String),
     TaskEdit { id: String, title: String },
     TaskDelete(String),
+    /// Cria uma subtarefa na tarefa dada.
+    SubTaskAdd { task_id: String, title: String },
     /// Marca ou desmarca uma subtarefa; re-busca a lista depois.
     SubTaskToggle {
         task_id: String,
@@ -129,6 +131,9 @@ pub fn spawn(
                     mutate_tasks(&ui, tasks::edit(&id, &title))
                 }
                 Ok(WorkerCmd::TaskDelete(id)) => mutate_tasks(&ui, tasks::delete(&id)),
+                Ok(WorkerCmd::SubTaskAdd { task_id, title }) => {
+                    mutate_tasks(&ui, tasks::add_subtask(&task_id, &title))
+                }
                 Ok(WorkerCmd::SubTaskToggle {
                     task_id,
                     item_id,
