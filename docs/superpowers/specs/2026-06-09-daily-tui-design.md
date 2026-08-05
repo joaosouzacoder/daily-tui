@@ -12,7 +12,7 @@ e um relógio em tempo real.
 
 - **Interação:** painel passivo com navegação leve (read-only). Rola listas
   e abre detalhe do e-mail; sem escrita/ações.
-- **Contas:** agregadas (work Empresa + personal Gmail) com marcador de
+- **Contas:** agregadas (a do trabalho + a pessoal) com marcador de
   origem `[W]` / `[P]`.
 - **Refresh dos dados externos:** a cada 5 minutos (+ refresh manual `r`).
 - **Relógio:** atualiza a cada 1s (`HH:MM:SS` + data por extenso em pt-BR).

@@ -106,9 +106,9 @@ fn strip_ansi(input: &str) -> String {
 /// Conta de origem de um item (e-mail ou agenda).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Account {
-    /// Conta de trabalho (Empresa).
+    /// Primeira conta configurada (por convenção, a do trabalho).
     Work,
-    /// Conta pessoal (Gmail).
+    /// Segunda conta configurada (por convenção, a pessoal).
     Personal,
 }
 

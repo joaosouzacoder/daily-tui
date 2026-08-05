@@ -51,11 +51,20 @@
 
 - [ ] **Step 1: Achar tudo antes de tocar em nada**
 
+Monte o padrão na hora, com os seus dados, e **não** o escreva em arquivo
+versionado — foi exatamente esse o erro na primeira versão deste plano:
+
 ```bash
-git ls-files -z | xargs -0 grep -niE "j\.gabrieltec|joao\.souza|empresa|empresa|voce"
+# Substitua pelos seus: usuário do SO, nome do empregador, domínio do Jira.
+PAT="$(printf '%s|%s|%s' "$USER" "seu-empregador" "seu-dominio")"
+git ls-files -z | xargs -0 grep -niE "$PAT"
 ```
 
-Esperado hoje (medido em 2026-08-05): o comentário `/// Conta de trabalho (Empresa).`, a linha 15 do spec de 2026-06-09, e os caminhos `C:\Users\voce\...` dentro do fixture do traceback. **Nada de e-mail nem de domínio Atlassian** em arquivo versionado — se aparecer algo novo, pare e mostre antes de seguir.
+Esperado hoje (medido em 2026-08-05): um comentário com o nome do empregador em
+`src/data/mod.rs`, a mesma menção na linha 15 do spec de 2026-06-09, e o seu
+usuário do Windows nos caminhos do fixture do traceback. **Nada de e-mail nem de
+domínio Atlassian** em arquivo versionado — se aparecer algo novo, pare e mostre
+antes de seguir.
 
 - [ ] **Step 2: Trocar por descrição genérica**
 
@@ -70,9 +79,13 @@ pub enum Account {
 }
 ```
 
-No spec, trocar `(work Empresa + personal Gmail)` por `(a do trabalho + a pessoal)`.
+No spec de 2026-06-09, a linha 15 nomeia o empregador ao descrever as contas:
+troque a menção por `(a do trabalho + a pessoal)`.
 
-No fixture, trocar `C:\Users\voce\` por `C:\Users\voce\` — o que o teste exercita é a *forma* do traceback (cabeçalho na primeira linha, exceção na última), não o caminho.
+Nos dois fixtures de erro — o traceback em `testdata/` e o do PowerShell dentro
+de `mod.rs` — troque o seu usuário do Windows por `voce`. O que os testes
+exercitam é a *forma* do erro (onde fica a mensagem que interessa), não o
+caminho.
 
 - [ ] **Step 3: Rodar os testes**
 

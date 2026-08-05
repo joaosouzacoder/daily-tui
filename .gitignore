@@ -2,3 +2,6 @@
 
 # Config local do launcher Windows (e-mails + referências 1Password) — pessoal.
 /scripts/daily-tui.config.ps1
+
+# Config local (painéis, contas, e-mails) — pessoal, nunca versionado.
+/daily-tui.toml
