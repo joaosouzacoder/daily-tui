@@ -15,6 +15,15 @@ use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
 use crate::data::{AgendaItem, TaskItem};
 
+/// Largura que sobra para o campo flexível de uma linha.
+///
+/// Os painéis tinham larguras fixas (assunto em 58, resumo em 44, título em 38),
+/// o que cortava texto mesmo com a tela larga. Aqui a sobra vem da largura real
+/// do painel, com um mínimo legível para não virar reticências em tela estreita.
+fn room_for(avail: usize, fixed: usize) -> usize {
+    avail.saturating_sub(fixed).max(12)
+}
+
 /// Calcula o deslocamento de rolagem para manter o cursor visível.
 ///
 /// `prev` é o deslocamento anterior (rolagem suave). Função pura.
@@ -130,6 +139,8 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
     };
     let focused = app.focus == Panel::Email;
 
+    let inner_probe = area.width.saturating_sub(2) as usize; // bordas do painel
+    let from_w = (inner_probe / 5).clamp(10, 24);
     let selected = focused.then_some(p.cursor);
     let lines: Vec<Line> = p
         .items
@@ -154,9 +165,12 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 theme.span(" "),
                 theme.muted(e.account.marker()),
                 theme.span(" "),
-                theme.span(clip(&e.from, 16)),
+                theme.span(clip(&e.from, from_w)),
                 theme.muted(" — "),
-                theme.span(clip(&e.subject, 58)),
+                theme.span(clip(
+                    &e.subject,
+                    room_for(inner_probe, 2 + 1 + 1 + 3 + 1 + from_w + 3),
+                )),
             ]);
             highlight(line, theme, selected == Some(i))
         })
@@ -180,7 +194,7 @@ fn render_agenda(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let title = format!(" AGENDA  {} ", p.items.len());
     let focused = app.focus == Panel::Agenda;
 
-    let lines = build_agenda_lines(&p.items, theme);
+    let lines = build_agenda_lines(&p.items, theme, area.width.saturating_sub(2) as usize);
 
     let inner = panel_inner(frame, theme, area, title, focused);
     if render_empty_state(frame, app, inner, p) {
@@ -222,6 +236,7 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
         }
     );
     let focused = app.focus == Panel::Jira;
+    let avail = area.width.saturating_sub(2) as usize;
     // O papel só explica algo no filtro `ambas`: nos outros, toda issue tem o
     // mesmo papel; em menções, a issue está ali por citação, não por papel.
     let show_role = app.jira_filter == jira::JiraFilter::Both;
@@ -235,7 +250,7 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
             }
             jira::JiraRow::Issue(i) => {
                 let item = &p.items[*i];
-                highlight(issue_line(item, theme, show_role), theme, selected == Some(*i))
+                highlight(issue_line(item, theme, show_role, avail), theme, selected == Some(*i))
             }
         })
         .collect();
@@ -257,7 +272,7 @@ fn render_jira(app: &App, frame: &mut Frame<'_>, area: Rect) {
 ///
 /// `show_role` só é verdadeiro no filtro `ambas` fora da visão de menções —
 /// nos outros casos o papel não distingue nada, e mostrá-lo seria ruído.
-fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool) -> Line<'static> {
+fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool, avail: usize) -> Line<'static> {
     let mut spans = vec![
         theme.span("  "),
         theme.accent(item.key.clone()),
@@ -265,12 +280,16 @@ fn issue_line(item: &JiraItem, theme: &BubbleTheme, show_role: bool) -> Line<'st
     ];
     // O marcador ("[AR] ") ocupa 5 colunas; o clip do resumo encurta na mesma
     // medida para a linha não vazar do painel.
-    let summary_width = if show_role {
+    let role_w = if show_role {
         spans.push(theme.muted(format!("{} ", item.role.marker())));
-        44 - 5
+        item.role.marker().chars().count() + 1
     } else {
-        44
+        0
     };
+    let summary_width = room_for(
+        avail,
+        2 + item.key.chars().count() + item.status.chars().count() + 4 + role_w,
+    );
     spans.push(theme.span(clip(&item.summary, summary_width)));
     Line::from(spans)
 }
@@ -281,6 +300,7 @@ fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let pending = p.items.iter().filter(|t| !t.completed).count();
     let title = format!(" TAREFAS  {}/{} ", pending, p.items.len());
     let focused = app.focus == Panel::Tasks;
+    let avail = area.width.saturating_sub(2) as usize;
 
     // O cursor indexa linhas, e uma linha é uma tarefa ou uma subtarefa de uma
     // tarefa expandida — por isso o achatamento vem antes da renderização.
@@ -293,10 +313,10 @@ fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
             let line = match kind {
                 tasks::TaskRow::Task(t) => {
                     let item = &p.items[*t];
-                    task_line(item, theme, app.tasks_expanded.contains(&item.id))
+                    task_line(item, theme, app.tasks_expanded.contains(&item.id), avail)
                 }
                 tasks::TaskRow::Sub { task, sub } => {
-                    subtask_line(&p.items[*task].subtasks[*sub], theme)
+                    subtask_line(&p.items[*task].subtasks[*sub], theme, avail)
                 }
             };
             highlight(line, theme, selected == Some(row))
@@ -319,7 +339,7 @@ fn render_tasks(app: &App, frame: &mut Frame<'_>, area: Rect) {
 ///
 /// A marca indica que há subtarefas escondidas: `▸` recolhida, `▾` expandida.
 /// Tarefa sem subtarefas não recebe marca, para não prometer o que não existe.
-fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool) -> Line<'static> {
+fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool, avail: usize) -> Line<'static> {
     let mark = if t.subtasks.is_empty() {
         "  "
     } else if expanded {
@@ -327,17 +347,19 @@ fn task_line(t: &TaskItem, theme: &BubbleTheme, expanded: bool) -> Line<'static>
     } else {
         "▸ "
     };
+    // "  [x] " ocupa 6 colunas; o prazo, quando existe, mais 7 ("  dd/mm").
+    let title_w = room_for(avail, 6 + if t.due.is_empty() { 0 } else { 7 });
     let mut spans = if t.completed {
         vec![
             theme.muted(mark),
             theme.muted("[x] "),
-            theme.muted(clip(&t.title, 38)),
+            theme.muted(clip(&t.title, title_w)),
         ]
     } else {
         vec![
             theme.muted(mark),
             theme.span("[ ] "),
-            theme.span(clip(&t.title, 38)),
+            theme.span(clip(&t.title, title_w)),
         ]
     };
     if !t.due.is_empty() {
@@ -358,6 +380,8 @@ fn render_notifications(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let items = app.notification_items();
 
     let title = format!(" NOTIFICAÇÕES  {} ", items.len());
+    // O overlay ocupa 76% da largura; menos as bordas do bloco.
+    let inner_w = (area.width as usize * 76 / 100).saturating_sub(4);
     let lines: Vec<Line> = if items.is_empty() {
         let msg = if app.jira_mentions.loaded {
             "Nada pedindo sua atenção."
@@ -373,9 +397,9 @@ fn render_notifications(app: &App, frame: &mut Frame<'_>, area: Rect) {
                 let line = Line::from(vec![
                     theme.muted(n.source.marker()),
                     theme.span(" "),
-                    theme.span(clip(&n.title, 52)),
+                    theme.span(clip(&n.title, room_for(inner_w, 8 + 2 + 26))),
                     theme.muted("  "),
-                    theme.muted(clip(&n.context, 24)),
+                    theme.muted(clip(&n.context, 26)),
                 ]);
                 highlight(line, theme, i == view.cursor)
             })
@@ -405,16 +429,16 @@ fn render_notifications(app: &App, frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// Linha de uma subtarefa: indentada sob a tarefa, com o mesmo checkbox.
-fn subtask_line(s: &SubTask, theme: &BubbleTheme) -> Line<'static> {
+fn subtask_line(s: &SubTask, theme: &BubbleTheme, avail: usize) -> Line<'static> {
     if s.completed {
         Line::from(vec![
             theme.muted("      [x] "),
-            theme.muted(clip(&s.title, 34)),
+            theme.muted(clip(&s.title, room_for(avail, 10))),
         ])
     } else {
         Line::from(vec![
             theme.span("      [ ] "),
-            theme.span(clip(&s.title, 34)),
+            theme.span(clip(&s.title, room_for(avail, 10))),
         ])
     }
 }
@@ -518,7 +542,7 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
 ///       - Evento
 ///       - Evento 2
 /// ```
-fn build_agenda_lines(items: &[AgendaItem], theme: &BubbleTheme) -> Vec<Line<'static>> {
+fn build_agenda_lines(items: &[AgendaItem], theme: &BubbleTheme, avail: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut cur_date: Option<String> = None;
     let mut cur_time: Option<String> = None;
@@ -543,7 +567,7 @@ fn build_agenda_lines(items: &[AgendaItem], theme: &BubbleTheme) -> Vec<Line<'st
         }
         lines.push(Line::from(vec![
             theme.muted("      - "),
-            theme.span(clip(&a.title, 46)),
+            theme.span(clip(&a.title, room_for(avail, 12))),
             theme.muted(" "),
             theme.muted(a.account.marker()),
         ]));
@@ -726,7 +750,10 @@ fn render_detail(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let popup = centered_rect(80, 80, area);
     frame.render_widget(Clear, popup);
 
-    let block = theme.titled_modal_block(format!(" {} ", clip(&d.subject, 60)));
+    let block = theme.titled_modal_block(format!(
+        " {} ",
+        clip(&d.subject, room_for(area.width as usize * 76 / 100, 8))
+    ));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -910,7 +937,7 @@ mod tests {
             mk("2026-06-09", "10:00", "Outro", Account::Work),
             mk("2026-06-10", "14:00", "Call", Account::Personal),
         ];
-        let lines: Vec<String> = build_agenda_lines(&items, &theme)
+        let lines: Vec<String> = build_agenda_lines(&items, &theme, 80)
             .iter()
             .map(|l| l.to_string())
             .collect();
@@ -1045,6 +1072,43 @@ mod tests {
         assert!(out.contains("31/40"), "o título situa onde você está");
         assert!(out.contains("etiqueta-30"), "a etiqueta sob o cursor aparece");
         assert!(!out.contains("etiqueta-00"), "as distantes não são desenhadas");
+    }
+
+    #[test]
+    fn panels_use_the_width_they_have_instead_of_a_fixed_clip() {
+        // O bug: larguras fixas (assunto em 58, resumo em 44, título em 38)
+        // cortavam texto mesmo com a tela larga. O mesmo conteúdo renderizado em
+        // duas larguras tem de mostrar mais na maior.
+        let long: String = "Assunto comprido que só cabe inteiro quando a janela é larga de verdade".into();
+        let mut app = test_app();
+        app.emails.items = vec![crate::data::EmailItem {
+            id: "1".into(),
+            account: crate::data::Account::Personal,
+            from: "Alguem".into(),
+            subject: long.clone(),
+            unread: true,
+            date: "2026-08-04 10:00+00:00".into(),
+        }];
+        app.emails.loaded = true;
+
+        // O painel ocupa metade da largura da tela, então a conta exata depende
+        // do layout: o que importa é que caiba MAIS quando há mais espaço.
+        let longest_visible = |w: u16| -> usize {
+            let out = render_to_string(&app, w, 30);
+            (1..=long.chars().count())
+                .rev()
+                .find(|n| {
+                    let prefix: String = long.chars().take(*n).collect();
+                    out.contains(&prefix)
+                })
+                .unwrap_or(0)
+        };
+        let narrow = longest_visible(100);
+        let wide = longest_visible(200);
+        assert!(
+            wide > narrow,
+            "largura maior tem de mostrar mais do assunto (estreito={narrow}, largo={wide})"
+        );
     }
 
     #[test]
