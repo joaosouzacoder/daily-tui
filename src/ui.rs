@@ -468,9 +468,12 @@ fn render_prompt(app: &App, frame: &mut Frame<'_>, area: Rect) {
                     .enumerate()
                     .skip(off)
                     .take(VISIBLE)
-                    .map(|(i, folder)| {
+                    .map(|(i, (account, folder))| {
                         highlight(
-                            Line::from(vec![theme.span(format!("  {}", clip(folder, 46)))]),
+                            Line::from(vec![
+                                theme.muted(format!("  {} ", account.marker())),
+                                theme.span(clip(folder, 42)),
+                            ]),
                             theme,
                             i == *cursor,
                         )
@@ -1014,7 +1017,10 @@ mod tests {
 
         app.prompt = Some(Prompt::PickFolder {
             items: vec![(crate::data::Account::Personal, "1".into())],
-            folders: vec!["inbox".into(), "Clientes".into()],
+            folders: vec![
+                (crate::data::Account::Personal, "inbox".into()),
+                (crate::data::Account::Personal, "Clientes".into()),
+            ],
             cursor: 1,
         });
         let out = render_to_string(&app, 120, 30);
@@ -1026,7 +1032,9 @@ mod tests {
     fn folder_picker_scrolls_around_the_cursor_with_many_labels() {
         // A conta real tem 40 etiquetas: o seletor rola em vez de tentar desenhar
         // todas de uma vez.
-        let folders: Vec<String> = (0..40).map(|i| format!("etiqueta-{i:02}")).collect();
+        let folders: Vec<(crate::data::Account, String)> = (0..40)
+            .map(|i| (crate::data::Account::Personal, format!("etiqueta-{i:02}")))
+            .collect();
         let mut app = test_app();
         app.prompt = Some(Prompt::PickFolder {
             items: vec![(crate::data::Account::Personal, "1".into())],

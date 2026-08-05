@@ -417,11 +417,14 @@ resto, use `x`.
 
 **As pastas do seletor vêm do servidor**, não de uma lista fixa — no Gmail isso
 inclui todas as suas etiquetas (40 na conta do autor), com as canônicas primeiro
-e o resto em ordem alfabética. A lista é buscada na primeira vez que você abre o
-seletor naquela conta e fica em cache pela sessão; enquanto não chega, o seletor
-diz que está buscando. Num lote com e-mails das duas contas, a lista é a da conta
-do primeiro alvo — um nome que só exista nela falha para os outros, e o erro
-aparece no painel.
+e o resto em ordem alfabética. São listadas **em segundo plano no arranque** e
+relistadas a cada 10 minutos, então o seletor abre pronto; a listagem tem cadência
+própria porque etiqueta nova é raro e cada listagem é uma ida ao IMAP por conta.
+
+O seletor mostra as pastas de **todas as contas** presentes nos alvos, cada uma
+com o marcador da conta (`[W]`/`[P]`). Escolher uma pasta move só os alvos daquela
+conta — uma etiqueta do work não existe na pessoal, então o resto do lote fica
+onde está.
 
 As escritas aparecem na tela **na hora** e a re-busca reconcilia depois. Se a
 escrita falhar, o erro aparece no painel e a lista volta ao que o servidor diz.

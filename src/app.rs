@@ -154,11 +154,13 @@ pub enum Prompt {
     ConfirmDelete { id: String, title: String },
     /// Escolha de pasta para mover os e-mails alvo (marcados, ou o do cursor).
     ///
-    /// A lista vem do servidor da conta do primeiro alvo — no Gmail, isso inclui
-    /// as etiquetas. Vazia enquanto a busca não volta.
+    /// A lista traz as pastas de **todas** as contas presentes nos alvos, cada
+    /// uma marcada com a conta — no Gmail, isso inclui as etiquetas. Mover só
+    /// alcança os alvos da conta da pasta escolhida: uma etiqueta do work não
+    /// existe na conta pessoal.
     PickFolder {
         items: Vec<(Account, String)>,
-        folders: Vec<String>,
+        folders: Vec<(Account, String)>,
         cursor: usize,
     },
     /// Confirmação de exclusão dos e-mails alvo (move para a Lixeira).
@@ -436,23 +438,48 @@ impl App {
     /// Abre o seletor de pasta para os alvos (marcados, ou o do cursor).
     fn open_move_email(&mut self) {
         let items = self.email_targets();
-        // A lista de pastas é a da conta do primeiro alvo. Num lote de contas
-        // diferentes, um nome que só existe numa delas falha para as outras — e o
-        // erro aparece no painel, que é o comportamento honesto aqui.
-        let Some(account) = items.first().map(|(a, _)| *a) else {
+        if items.is_empty() {
             return;
-        };
-        let folders = self.folders.get(&account).cloned().unwrap_or_default();
-        if folders.is_empty() {
-            // Primeira vez nesta conta: abre o seletor mostrando que está
-            // buscando, e o resultado preenche a lista sem fechar o prompt.
-            let _ = self.cmd_tx.send(WorkerCmd::FetchFolders(account));
         }
+        // Pede ao worker o que ainda não está em cache; o prefetch do arranque
+        // normalmente já resolveu, isto é a rede de segurança.
+        for account in self.target_accounts(&items) {
+            if !self.folders.contains_key(&account) {
+                let _ = self.cmd_tx.send(WorkerCmd::FetchFolders(account));
+            }
+        }
+        let folders = self.folder_entries(&items);
         self.prompt = Some(Prompt::PickFolder {
             items,
             folders,
             cursor: 0,
         });
+    }
+
+    /// Contas presentes nos alvos, na ordem em que aparecem.
+    fn target_accounts(&self, items: &[(Account, String)]) -> Vec<Account> {
+        let mut out: Vec<Account> = Vec::new();
+        for (account, _) in items {
+            if !out.contains(account) {
+                out.push(*account);
+            }
+        }
+        out
+    }
+
+    /// Pastas de todas as contas dos alvos, cada uma com a sua conta.
+    fn folder_entries(&self, items: &[(Account, String)]) -> Vec<(Account, String)> {
+        self.target_accounts(items)
+            .into_iter()
+            .flat_map(|account| {
+                self.folders
+                    .get(&account)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |name| (account, name))
+            })
+            .collect()
     }
 
     /// Pede confirmação antes de mover os alvos para a Lixeira.
@@ -653,9 +680,12 @@ impl App {
                 folders,
                 cursor,
             }) => {
-                let Some(folder) = folders.get(cursor).cloned() else {
+                let Some((account, folder)) = folders.get(cursor).cloned() else {
                     return; // lista ainda vazia: nada a mover
                 };
+                // Só os alvos da conta da pasta: o resto do lote fica onde está.
+                let items: Vec<(Account, String)> =
+                    items.into_iter().filter(|(a, _)| *a == account).collect();
                 // Saem da lista na hora: deixaram a pasta atual, e esperar o IMAP
                 // para refletir isso faz a ação parecer ignorada.
                 self.drop_emails(&items);
@@ -766,10 +796,15 @@ impl Model for App {
                     Ok(names) => {
                         // Preenche o prompt já aberto, para o seletor sair do
                         // "buscando…" sem o usuário reabrir.
-                        if let Some(Prompt::PickFolder { folders, .. }) = &mut self.prompt {
-                            *folders = names.clone();
-                        }
                         self.folders.insert(account, names);
+                        // Reconstrói a lista do prompt aberto, para o seletor sair
+                        // do "buscando…" sem o usuário reabrir.
+                        if let Some(Prompt::PickFolder { items, .. }) = &self.prompt {
+                            let rebuilt = self.folder_entries(&items.clone());
+                            if let Some(Prompt::PickFolder { folders, .. }) = &mut self.prompt {
+                                *folders = rebuilt;
+                            }
+                        }
                     }
                     Err(e) => self.emails.error = Some(e),
                 }
@@ -937,6 +972,53 @@ mod tests {
             }
             other => panic!("esperava SubTaskToggle, veio outro comando: {}", other.is_ok()),
         }
+    }
+
+    #[test]
+    fn picker_lists_folders_of_every_account_in_the_batch() {
+        let mut app = test_app();
+        let mut work = email_item("1", false);
+        work.account = Account::Work;
+        app.emails.items = vec![work, email_item("2", false)]; // 2 é Personal
+        app.emails.loaded = true;
+        app.emails_marked = ["1".to_string(), "2".to_string()].into_iter().collect();
+        app.folders
+            .insert(Account::Work, vec!["Clientes".into()]);
+        app.folders
+            .insert(Account::Personal, vec!["Faturas".into()]);
+
+        app.update(key(KeyCode::Char('m')));
+        match &app.prompt {
+            Some(Prompt::PickFolder { folders, .. }) => {
+                assert_eq!(folders.len(), 2, "as duas contas do lote entram");
+                assert!(folders.contains(&(Account::Work, "Clientes".to_string())));
+                assert!(folders.contains(&(Account::Personal, "Faturas".to_string())));
+            }
+            _ => panic!("esperava PickFolder"),
+        }
+    }
+
+    #[test]
+    fn moving_only_touches_the_targets_of_the_chosen_folders_account() {
+        let mut app = test_app();
+        let mut work = email_item("1", false);
+        work.account = Account::Work;
+        app.emails.items = vec![work, email_item("2", false)];
+        app.emails.loaded = true;
+        app.emails_marked = ["1".to_string(), "2".to_string()].into_iter().collect();
+        app.prompt = Some(Prompt::PickFolder {
+            items: vec![
+                (Account::Work, "1".to_string()),
+                (Account::Personal, "2".to_string()),
+            ],
+            // Etiqueta que só existe no work: a pessoal não pode ir para lá.
+            folders: vec![(Account::Work, "Clientes".to_string())],
+            cursor: 0,
+        });
+
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.emails.items.len(), 1, "só o do work sai da tela");
+        assert_eq!(app.emails.items[0].id, "2");
     }
 
     #[test]

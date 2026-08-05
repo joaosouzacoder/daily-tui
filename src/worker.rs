@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui_tea::ProgramHandle;
 
@@ -13,6 +13,16 @@ use crate::msg::Msg;
 
 /// Quantos e-mails buscar por conta.
 const EMAIL_LIMIT: u32 = 50;
+
+/// De quanto em quanto tempo relistar as pastas das contas.
+///
+/// Etiqueta nova é raro, e listar pastas é uma ida ao IMAP por conta — cadência
+/// própria, mais folgada que o refresh dos painéis, para não cobrar do usuário
+/// uma espera que ele não pediu.
+const FOLDERS_TTL: Duration = Duration::from_secs(600);
+
+/// Contas cujas pastas e e-mails são buscados.
+const ACCOUNTS: [Account; 2] = [Account::Work, Account::Personal];
 
 /// Comandos enviados do loop principal para o worker.
 pub enum WorkerCmd {
@@ -73,12 +83,17 @@ pub fn spawn(
         // buscas de antes, não sempre o padrão.
         let mut jira_filter = JiraFilter::default();
         let mut mentions_loaded = false;
+        // Última listagem de pastas; `None` força a primeira no arranque, para o
+        // seletor de "mover" já abrir preenchido.
+        let mut folders_at: Option<Instant> = None;
         refresh_all(&ui, jira_filter, mentions_loaded);
+        refresh_folders(&ui, &mut folders_at);
 
         loop {
             match rx.recv_timeout(refresh) {
                 Ok(WorkerCmd::RefreshAll) | Err(RecvTimeoutError::Timeout) => {
-                    refresh_all(&ui, jira_filter, mentions_loaded)
+                    refresh_all(&ui, jira_filter, mentions_loaded);
+                    refresh_folders(&ui, &mut folders_at);
                 }
                 Ok(WorkerCmd::FetchJira(filter)) => {
                     jira_filter = filter;
@@ -153,6 +168,21 @@ fn mutate_tasks(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
     let _ = ui.send(Msg::TasksLoaded(loaded));
 }
 
+/// Relista as pastas de todas as contas se o cache passou do TTL.
+///
+/// Vem depois dos painéis no arranque: nada na tela depende disso, então não
+/// deve atrasar o que o usuário está olhando.
+fn refresh_folders(ui: &ProgramHandle<Msg>, at: &mut Option<Instant>) {
+    let stale = at.map(|t| t.elapsed() >= FOLDERS_TTL).unwrap_or(true);
+    if !stale {
+        return;
+    }
+    for account in ACCOUNTS {
+        let _ = ui.send(Msg::FoldersLoaded(account, email::folders(account)));
+    }
+    *at = Some(Instant::now());
+}
+
 /// Aplica a escrita em cada alvo e devolve o primeiro erro, se houver.
 ///
 /// Segue nos demais depois de uma falha: numa ação em lote, o usuário prefere
@@ -183,8 +213,8 @@ fn mutate_emails(ui: &ProgramHandle<Msg>, result: Result<(), String>) {
 
 /// Agrega e-mails das duas contas e ordena do mais recente para o mais antigo.
 fn fetch_emails() -> Result<Vec<email::EmailItem>, String> {
-    let mut all = email::fetch(Account::Work, EMAIL_LIMIT)?;
-    all.extend(email::fetch(Account::Personal, EMAIL_LIMIT)?);
+    let mut all = email::fetch(ACCOUNTS[0], EMAIL_LIMIT)?;
+    all.extend(email::fetch(ACCOUNTS[1], EMAIL_LIMIT)?);
     email::sort_recent_first(&mut all);
     Ok(all)
 }
