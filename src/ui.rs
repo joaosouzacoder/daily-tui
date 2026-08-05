@@ -420,12 +420,15 @@ fn render_notifications(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let height = rows[0].height as usize;
     let off = window(lines.len(), view.cursor, 0, height);
     render_lines(frame, theme, rows[0], lines, off);
-    frame.render_widget(
-        Paragraph::new(Line::from(theme.muted(
-            "j/k: navegar · Enter: abrir no navegador · Esc/n: fechar",
-        ))),
-        rows[1],
-    );
+    // Sem banco a leitura não sobrevive ao fechar o programa; melhor dizer isso
+    // aqui do que deixar as mesmas notificações voltando sem explicação.
+    let footer = match &app.store_error {
+        Some(e) => Line::from(theme.error(format!("banco indisponível: {e}"))),
+        None => Line::from(theme.muted(
+            "j/k: navegar · Espaço: marcar lida · Enter: abrir no navegador · Esc/n: fechar",
+        )),
+    };
+    frame.render_widget(Paragraph::new(footer), rows[1]);
 }
 
 /// Linha de uma subtarefa: indentada sob a tarefa, com o mesmo checkbox.

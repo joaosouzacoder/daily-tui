@@ -25,6 +25,9 @@ impl Source {
 /// Uma linha da central de notificações.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
+    /// Identidade estável, usada para guardar no banco que você já leu esta.
+    /// Prefixada pela fonte para duas fontes nunca colidirem.
+    pub id: String,
     pub source: Source,
     /// O que aconteceu, em uma linha.
     pub title: String,
@@ -39,6 +42,9 @@ pub fn from_jira_mentions(items: &[JiraItem]) -> Vec<Notification> {
     items
         .iter()
         .map(|i| Notification {
+            // A issue é a identidade: marcar como lida dispensa esta menção
+            // para sempre, que é o que se espera de uma central que se limpa.
+            id: format!("jira:{}", i.key),
             source: Source::Jira,
             title: i.summary.clone(),
             context: format!("{} · {}", i.key, i.status),
@@ -63,6 +69,7 @@ mod tests {
         let items = parse_issues(MENTIONS).unwrap();
         let notes = from_jira_mentions(&items);
         assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, "jira:ENG-101");
         assert_eq!(notes[0].source, Source::Jira);
         assert_eq!(notes[0].title, "Revisar o plano de capacidade");
         assert_eq!(notes[0].context, "ENG-101 · Em andamento");

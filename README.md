@@ -451,7 +451,9 @@ valendo só para tarefas.
 
 `n` abre a **central de notificações** de qualquer painel: um overlay com o que
 pede sua atenção, cada linha marcada pela fonte (`[JIRA]` hoje). `j`/`k` navegam,
-`Enter` abre no navegador, `Esc` ou `n` fecham. Hoje ela lista as menções a você
+`Espaço` marca como lida, `Enter` abre no navegador, `Esc` ou `n` fecham. O que
+você marca como lido é gravado num banco SQLite local e **não volta** — a
+identidade é a issue, então uma menção dispensada fica dispensada. Hoje ela lista as menções a você
 no Jira dos últimos 30 dias; foi desenhada para receber outras fontes — convites
 de agenda para aceitar, menções no GitHub — sem mudar o overlay.
 
@@ -474,6 +476,19 @@ ambígua.
   canal do `ratatui-tea`, então nada bloqueia o relógio nem o teclado.
 - Cada fonte de dado é um módulo em `src/data/` que só executa uma CLI e parseia a
   saída (`email.rs`, `agenda.rs`, `pulls.rs`, `jira.rs`, `tasks.rs`).
+- O que precisa sobreviver ao fechar o programa fica num SQLite local
+  (`src/store.rs`): as notificações já lidas e o cache das pastas do e-mail —
+  listar etiquetas no IMAP leva segundos, e o seletor de "mover" abre cheio com o
+  que estava em cache enquanto o worker relista em segundo plano. Só a thread da
+  UI fala com o banco.
+
+  | Sistema | Caminho do banco                          |
+  |---------|-------------------------------------------|
+  | Windows | `%LOCALAPPDATA%\daily-tui\daily-tui.db`    |
+  | Linux   | `~/.local/share/daily-tui/daily-tui.db`   |
+
+  Apagar o arquivo é seguro: as notificações lidas voltam a aparecer e as pastas
+  são relistadas.
 
 Veja o design em [`docs/superpowers/specs/2026-06-09-daily-tui-design.md`](docs/superpowers/specs/2026-06-09-daily-tui-design.md).
 
@@ -496,3 +511,4 @@ Primeiro recurso, sempre: **`./scripts/setup-auth.sh check`** — ele aponta qua
 | `mstodo: sem credenciais — rode: mstodo auth`    | falta autorizar; rode `mstodo auth` (ou `setup-auth.sh mstodo`; no Windows, `scripts\google-auth.cmd`). |
 | `client secret não encontrado`                   | baixe o OAuth client (Google Cloud) e rode `setup-auth.sh google`.                   |
 | Erro de compilação por OpenSSL                   | falta `libssl-dev`/`openssl-devel` — rode o `install.sh` sem `--skip-system`.        |
+| `banco indisponível: …` na central de notificações | o SQLite não abriu (permissão, disco cheio). O painel segue funcionando, só sem memória entre execuções. |

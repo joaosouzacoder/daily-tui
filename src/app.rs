@@ -14,6 +14,7 @@ use crate::data::jira::{JiraFilter, JiraItem, JiraView};
 use crate::data::{notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::Msg;
+use crate::store::Store;
 use crate::ui;
 use crate::worker::WorkerCmd;
 
@@ -253,6 +254,14 @@ pub struct App {
     pub prompt: Option<Prompt>,
     /// Central de notificações aberta (overlay global, tecla `n`).
     pub notifications: Option<NotificationsView>,
+    /// Notificações que você já leu. Vem do banco no arranque e cresce com
+    /// `Espaço` no overlay; usada para filtrar a lista.
+    notifications_read: std::collections::HashSet<String>,
+    /// Banco local (notificações lidas, cache de pastas). `None` quando não
+    /// abriu — o painel funciona sem ele, só sem memória entre execuções.
+    store: Option<Store>,
+    /// Por que o banco não abriu, mostrado no overlay de notificações.
+    pub store_error: Option<String>,
     cmd_tx: Sender<WorkerCmd>,
 }
 
@@ -285,6 +294,9 @@ impl App {
             detail: None,
             prompt: None,
             notifications: None,
+            notifications_read: std::collections::HashSet::new(),
+            store: None,
+            store_error: None,
             cmd_tx,
         }
     }
@@ -432,6 +444,51 @@ impl App {
         let _ = self.cmd_tx.send(WorkerCmd::EmailSetSeen { items, seen });
     }
 
+    /// Liga o banco ao app, já carregando o que ele guardou.
+    ///
+    /// Fica fora do `new` para os testes não tocarem no banco de verdade, e
+    /// porque abrir um arquivo pode falhar — e falhar aqui não pode derrubar o
+    /// painel: sem banco, o programa roda sem memória entre execuções.
+    pub fn attach_store(&mut self, opened: Result<Store, String>) {
+        match opened {
+            Ok(store) => {
+                match store.read_notifications() {
+                    Ok(read) => self.notifications_read = read,
+                    Err(e) => self.store_error = Some(e),
+                }
+                // Pastas em cache já valem para o seletor de "mover" abrir cheio
+                // na primeira vez; o worker relista em segundo plano e corrige.
+                match store.folders() {
+                    Ok(folders) => self.folders.extend(folders),
+                    Err(e) => self.store_error = Some(e),
+                }
+                self.store = Some(store);
+            }
+            Err(e) => self.store_error = Some(e),
+        }
+    }
+
+    /// Marca como lida a notificação sob o cursor: sai da lista e não volta.
+    fn read_notification(&mut self) {
+        let Some(view) = &self.notifications else {
+            return;
+        };
+        let Some(note) = self.notification_items().into_iter().nth(view.cursor) else {
+            return;
+        };
+        self.notifications_read.insert(note.id.clone());
+        if let Some(store) = &self.store
+            && let Err(e) = store.mark_notification_read(&note.id, &self.now.to_rfc3339())
+        {
+            self.store_error = Some(e);
+        }
+        // A lista encurtou: o cursor não pode ficar depois do fim dela.
+        let total = self.notification_items().len();
+        if let Some(view) = &mut self.notifications {
+            view.cursor = view.cursor.min(total.saturating_sub(1));
+        }
+    }
+
     /// Abre a central de notificações. Busca as fontes que ainda não carregaram —
     /// hoje só o Jira — para não pagar a consulta de quem nunca abre o overlay.
     fn open_notifications(&mut self) {
@@ -443,7 +500,9 @@ impl App {
 
     /// Notificações de todas as fontes carregadas, na ordem em que aparecem.
     pub fn notification_items(&self) -> Vec<notify::Notification> {
-        notify::from_jira_mentions(&self.jira_mentions.items)
+        let mut items = notify::from_jira_mentions(&self.jira_mentions.items);
+        items.retain(|n| !self.notifications_read.contains(&n.id));
+        items
     }
 
     /// Trata teclas com a central de notificações aberta.
@@ -460,6 +519,7 @@ impl App {
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => view.cursor = view.cursor.saturating_sub(1),
+            KeyCode::Char(' ') => self.read_notification(),
             KeyCode::Enter => {
                 let cursor = view.cursor;
                 let url = self
@@ -920,8 +980,12 @@ impl Model for App {
             Msg::FoldersLoaded(account, res) => {
                 match res {
                     Ok(names) => {
-                        // Preenche o prompt já aberto, para o seletor sair do
-                        // "buscando…" sem o usuário reabrir.
+                        if let Some(store) = &self.store
+                            && let Err(e) =
+                                store.save_folders(account, &names, &self.now.to_rfc3339())
+                        {
+                            self.store_error = Some(e);
+                        }
                         self.folders.insert(account, names);
                         // Reconstrói a lista do prompt aberto, para o seletor sair
                         // do "buscando…" sem o usuário reabrir.
@@ -1379,6 +1443,139 @@ mod tests {
         assert_eq!(app.focus, Panel::Email, "o painel focado não muda");
         app.update(key(KeyCode::Esc));
         assert!(app.notifications.is_none(), "Esc fecha a central");
+    }
+
+    /// Menção do Jira, o suficiente para virar notificação.
+    fn mention(key: &str) -> JiraItem {
+        JiraItem {
+            key: key.into(),
+            summary: format!("menção em {key}"),
+            status: "Em andamento".into(),
+            project: "ENG".into(),
+            url: format!("https://example.atlassian.net/browse/{key}"),
+            parent: None,
+            role: Default::default(),
+        }
+    }
+
+    /// Banco novo num arquivo só deste teste.
+    fn temp_store(name: &str) -> (Store, std::path::PathBuf) {
+        let path = std::env::temp_dir()
+            .join("daily-tui-tests")
+            .join(format!("app-{name}-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        (Store::open_at(&path).expect("abre o banco"), path)
+    }
+
+    #[test]
+    fn a_notification_marked_read_is_gone_on_the_next_run() {
+        let (store, path) = temp_store("read-notifications");
+        let mut app = test_app();
+        app.attach_store(Ok(store));
+        app.jira_mentions.set(Ok(vec![mention("ENG-1"), mention("ENG-2")]));
+
+        app.update(key(KeyCode::Char('n')));
+        app.update(key(KeyCode::Char(' '))); // marca a primeira como lida
+        assert_eq!(
+            app.notification_items()
+                .iter()
+                .map(|n| n.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["jira:ENG-2"],
+            "sai da lista na hora"
+        );
+
+        // Execução seguinte: mesmo banco, mesmas menções vindas do Jira.
+        let mut next = test_app();
+        next.attach_store(Store::open_at(&path));
+        next.jira_mentions.set(Ok(vec![mention("ENG-1"), mention("ENG-2")]));
+        assert_eq!(
+            next.notification_items().len(),
+            1,
+            "a lida não volta ao abrir o programa de novo"
+        );
+        assert!(next.store_error.is_none());
+    }
+
+    #[test]
+    fn reading_the_last_notification_keeps_the_cursor_in_the_list() {
+        let (store, _) = temp_store("read-cursor");
+        let mut app = test_app();
+        app.attach_store(Ok(store));
+        app.jira_mentions.set(Ok(vec![mention("ENG-1"), mention("ENG-2")]));
+
+        app.update(key(KeyCode::Char('n')));
+        app.update(key(KeyCode::Char('j'))); // cursor na última
+        app.update(key(KeyCode::Char(' ')));
+        assert_eq!(app.notification_items().len(), 1);
+        assert_eq!(
+            app.notifications.as_ref().unwrap().cursor,
+            0,
+            "o cursor não fica apontando para fora da lista"
+        );
+    }
+
+    #[test]
+    fn cached_folders_fill_the_picker_before_the_server_answers() {
+        let (store, path) = temp_store("folder-cache");
+        let at = "2026-08-04T10:00:00-03:00";
+        store
+            .save_folders(
+                Account::Personal,
+                &["INBOX".to_string(), "Faturas".to_string()],
+                at,
+            )
+            .unwrap();
+        drop(store);
+
+        let mut app = test_app();
+        app.attach_store(Store::open_at(&path));
+        app.emails.items = vec![email_item("42", false)];
+        app.emails.loaded = true;
+
+        app.update(key(KeyCode::Char('m')));
+        match &app.prompt {
+            Some(Prompt::PickFolder { folders, .. }) => assert_eq!(
+                folders.len(),
+                2,
+                "abre com o que estava em cache, sem esperar o IMAP"
+            ),
+            _ => panic!("esperava PickFolder"),
+        }
+    }
+
+    #[test]
+    fn folders_from_the_server_are_written_to_the_cache() {
+        let (store, path) = temp_store("folder-save");
+        let mut app = test_app();
+        app.attach_store(Ok(store));
+
+        app.update(Msg::FoldersLoaded(
+            Account::Work,
+            Ok(vec!["INBOX".into(), "Clientes".into()]),
+        ));
+
+        let saved = Store::open_at(&path).unwrap().folders().unwrap();
+        assert_eq!(
+            saved.get(&Account::Work),
+            Some(&vec!["INBOX".to_string(), "Clientes".to_string()])
+        );
+    }
+
+    #[test]
+    fn without_a_store_the_center_still_works_and_says_why() {
+        // Banco é conveniência: sem ele o programa não pode parar de funcionar.
+        let mut app = test_app();
+        app.attach_store(Err("disco cheio".into()));
+        app.jira_mentions.set(Ok(vec![mention("ENG-1")]));
+
+        app.update(key(KeyCode::Char('n')));
+        app.update(key(KeyCode::Char(' ')));
+        assert!(
+            app.notification_items().is_empty(),
+            "marcar como lida vale nesta sessão mesmo sem banco"
+        );
+        assert_eq!(app.store_error.as_deref(), Some("disco cheio"));
     }
 
     #[test]

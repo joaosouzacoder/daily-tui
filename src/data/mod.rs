@@ -129,6 +129,17 @@ impl Account {
         }
     }
 
+    /// A conta com este nome do himalaya, se for uma das do app.
+    ///
+    /// Usado para reler o que foi persistido: o nome é a chave estável no banco.
+    pub fn from_himalaya_name(name: &str) -> Option<Self> {
+        match name {
+            "work" => Some(Account::Work),
+            "personal" => Some(Account::Personal),
+            _ => None,
+        }
+    }
+
     /// Subdiretório da conta no gcalcli (sob `~/.local/share/gcalcli-accounts`).
     pub const fn gcalcli_dir(self) -> &'static str {
         match self {

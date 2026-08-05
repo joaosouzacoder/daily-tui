@@ -5,6 +5,7 @@ mod app;
 mod clock;
 mod data;
 mod msg;
+mod store;
 mod ui;
 mod worker;
 
@@ -34,7 +35,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
     let (ui_handle, ui_rx) = ratatui_tea::channel::<Msg>();
     let (cmd_tx, worker_handle) = worker::spawn(ui_handle, REFRESH);
 
-    let mut program = Program::new(App::new(BubbleTheme::default(), cmd_tx.clone()));
+    let mut app = App::new(BubbleTheme::default(), cmd_tx.clone());
+    // Banco só depois do app pronto: se ele não abrir, o painel segue vivo (sem
+    // memória de notificação lida nem cache de pastas) e diz o motivo.
+    app.attach_store(store::Store::open());
+    let mut program = Program::new(app);
     program.init();
     program.draw(terminal)?;
 
