@@ -1379,6 +1379,10 @@ impl Model for App {
                     detail.body = Some(res);
                 }
             }
+            // Genérico de propósito (título + corpo, nada de painel): quem sabe
+            // o que fazer com a falha é quem manda a notificação. Chega no
+            // painel do pomodoro numa tarefa futura.
+            Msg::Notified(_) => {}
         }
         Cmd::none()
     }

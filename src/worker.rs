@@ -69,6 +69,9 @@ pub enum WorkerCmd {
         item_id: String,
         check: bool,
     },
+    /// Manda uma notificação. Roda aqui porque falar com o DBus ou subir um
+    /// processo é I/O — no loop principal, travaria o relógio.
+    Notify(crate::notify::Notice),
     /// Encerra a thread.
     Quit,
 }
@@ -162,6 +165,9 @@ pub fn spawn(
                         tasks::uncheck(&task_id, &item_id)
                     },
                 ),
+                Ok(WorkerCmd::Notify(notice)) => {
+                    let _ = ui.send(Msg::Notified(crate::notify::send(&notice)));
+                }
                 Ok(WorkerCmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
             }
         }

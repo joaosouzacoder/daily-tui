@@ -54,4 +54,7 @@ pub enum Msg {
     /// Corpo de um e-mail. Carrega a chave porque o corpo é buscado em segundo
     /// plano: quando chega, pode não ser mais o e-mail sob o cursor.
     EmailBody(crate::data::Account, String, Result<String, String>),
+    /// Fim de um envio de notificação. Só interessa quando falha: achar que
+    /// vai ser avisado e não ser é o pior defeito possível aqui.
+    Notified(Result<(), String>),
 }
