@@ -1289,7 +1289,8 @@ impl App {
                 let _ = self.cmd_tx.send(WorkerCmd::RefreshAll);
             }
             // Maiúsculas e globais: o pomodoro vive no header, não é painel, e
-            // não deve exigir foco. `P`/`R` minúsculas já são de painel.
+            // não deve exigir foco. `p` minúsculo já é do painel de Jira, e `r`
+            // minúsculo já é o refresh global — daí as maiúsculas aqui.
             KeyCode::Char('P') => {
                 self.pomodoro.toggle(Instant::now());
                 self.notify_error = None;
@@ -2833,8 +2834,15 @@ mod tests {
         match rx.try_recv() {
             Ok(WorkerCmd::Notify(n)) => {
                 assert!(n.title.contains("pausa"), "título: {}", n.title);
-                // Os minutos saem do config, não estão fixos no texto.
-                assert!(n.body.contains("5 min"), "corpo: {}", n.body);
+                // Ancorado em `cfg.rest`, não em "5 min": o config de teste tem
+                // focus=25/rest=5, e "25 min" também contém a substring "5 min" —
+                // um `contains("5 min")` passaria mesmo trocando rest por focus.
+                let rest = config::get().pomodoro.rest;
+                assert!(
+                    n.body.contains(&format!("Descanso de {rest} min")),
+                    "corpo: {}",
+                    n.body
+                );
             }
             _ => panic!("esperava WorkerCmd::Notify"),
         }
