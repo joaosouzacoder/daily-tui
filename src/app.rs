@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use ratatui::Frame;
@@ -10,11 +11,14 @@ use ratatui_bubbletea_components::{Spinner, SpinnerFrames};
 use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
 
+use crate::config;
 use crate::data::jira::{JiraFilter, JiraItem, JiraView};
 use crate::data::tasks::SubTask;
 use crate::data::{notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::{EmailWriteKind, Msg};
+use crate::notify::Notice;
+use crate::pomodoro::{Phase, Pomodoro};
 use crate::store::Store;
 use crate::ui;
 use crate::worker::WorkerCmd;
@@ -439,6 +443,11 @@ pub struct App {
     store: Option<Store>,
     /// Por que o banco não abriu, mostrado no overlay de notificações.
     pub store_error: Option<String>,
+    /// Pomodoro do header. Estado em memória: fechar o painel esquece o
+    /// contador de focos, e isso é aceito.
+    pub pomodoro: Pomodoro,
+    /// Por que o último aviso não saiu, mostrado na caixa do pomodoro.
+    pub notify_error: Option<String>,
     cmd_tx: Sender<WorkerCmd>,
 }
 
@@ -478,6 +487,14 @@ impl App {
             notifications_read: std::collections::HashSet::new(),
             store: None,
             store_error: None,
+            pomodoro: {
+                let cfg = config::get().pomodoro;
+                Pomodoro::new(
+                    Duration::from_secs(cfg.focus * 60),
+                    Duration::from_secs(cfg.rest * 60),
+                )
+            },
+            notify_error: None,
             cmd_tx,
         }
     }
@@ -1216,6 +1233,31 @@ impl App {
         let _ = self.cmd_tx.send(cmd);
     }
 
+    /// Avança o pomodoro e, quando a fase virou, pede o aviso ao worker.
+    ///
+    /// Roda no `ClockTick` e não numa tecla: o aviso nasce do tempo passar, e
+    /// tem de sair também quando você está com um overlay aberto.
+    fn pomodoro_tick(&mut self, now: Instant) {
+        let Some(ended) = self.pomodoro.tick(now) else {
+            return;
+        };
+        let cfg = config::get().pomodoro;
+        let notice = match ended {
+            Phase::Focus => Notice::new(
+                "Pomodoro: hora da pausa",
+                format!(
+                    "{} min de foco fechados. Descanso de {} min já começou.",
+                    cfg.focus, cfg.rest
+                ),
+            ),
+            Phase::Break => Notice::new(
+                "Pomodoro: de volta ao foco",
+                format!("Pausa de {} min terminou. Aperte P para o próximo.", cfg.rest),
+            ),
+        };
+        let _ = self.cmd_tx.send(WorkerCmd::Notify(notice));
+    }
+
     /// Trata teclas no modo painel (dashboard).
     fn handle_panel_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1245,6 +1287,16 @@ impl App {
             },
             KeyCode::Char('r') => {
                 let _ = self.cmd_tx.send(WorkerCmd::RefreshAll);
+            }
+            // Maiúsculas e globais: o pomodoro vive no header, não é painel, e
+            // não deve exigir foco. `P`/`R` minúsculas já são de painel.
+            KeyCode::Char('P') => {
+                self.pomodoro.toggle(Instant::now());
+                self.notify_error = None;
+            }
+            KeyCode::Char('R') => {
+                self.pomodoro.reset();
+                self.notify_error = None;
             }
             // Ações do painel de tarefas (só quando ele está focado).
             KeyCode::Char('x') if self.focus == Panel::Email => self.toggle_mark(),
@@ -1291,6 +1343,7 @@ impl Model for App {
                 self.prefetch_cursor_body();
                 self.now = Local::now();
                 self.spinner.tick();
+                self.pomodoro_tick(Instant::now());
             }
             Msg::Key(key) => {
                 if self.detail.is_some() {
@@ -1380,9 +1433,8 @@ impl Model for App {
                 }
             }
             // Genérico de propósito (título + corpo, nada de painel): quem sabe
-            // o que fazer com a falha é quem manda a notificação. Chega no
-            // painel do pomodoro numa tarefa futura.
-            Msg::Notified(_) => {}
+            // o que fazer com a falha é quem manda a notificação.
+            Msg::Notified(res) => self.notify_error = res.err(),
         }
         Cmd::none()
     }
@@ -1396,11 +1448,19 @@ impl Model for App {
 mod tests {
     use super::*;
     use crate::data::Account;
+    use crate::pomodoro::Pomodoro;
     use std::sync::mpsc;
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::channel();
         App::new(BubbleTheme::default(), tx)
+    }
+
+    /// Como o `test_app()`, mas devolve a ponta do worker: canal desconectado
+    /// engoliria o comando que estes testes precisam ver.
+    fn test_app_with_worker() -> (App, std::sync::mpsc::Receiver<WorkerCmd>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (App::new(BubbleTheme::default(), tx), rx)
     }
 
     fn key(code: KeyCode) -> Msg {
@@ -2737,5 +2797,91 @@ mod tests {
         assert!(app.prompt.is_none());
         app.update(key(KeyCode::Char(' ')));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn uppercase_p_starts_and_pauses_the_pomodoro() {
+        let mut app = test_app();
+        assert!(!app.pomodoro.running());
+        app.update(key(KeyCode::Char('P')));
+        assert!(app.pomodoro.running());
+        app.update(key(KeyCode::Char('P')));
+        assert!(!app.pomodoro.running());
+    }
+
+    #[test]
+    fn uppercase_r_refills_the_phase_without_erasing_the_finished_focuses() {
+        let mut app = test_app();
+        app.pomodoro = Pomodoro::new(Duration::ZERO, Duration::from_secs(300));
+        app.pomodoro.toggle(Instant::now());
+        app.update(Msg::ClockTick); // fecha o foco, entra no descanso
+        assert_eq!(app.pomodoro.done(), 1);
+
+        app.update(key(KeyCode::Char('R')));
+        assert!(!app.pomodoro.running());
+        assert_eq!(app.pomodoro.done(), 1);
+    }
+
+    #[test]
+    fn the_end_of_a_focus_asks_the_worker_for_the_notice() {
+        let (mut app, rx) = test_app_with_worker();
+        app.pomodoro = Pomodoro::new(Duration::ZERO, Duration::from_secs(300));
+        app.pomodoro.toggle(Instant::now());
+
+        app.update(Msg::ClockTick);
+
+        match rx.try_recv() {
+            Ok(WorkerCmd::Notify(n)) => {
+                assert!(n.title.contains("pausa"), "título: {}", n.title);
+                // Os minutos saem do config, não estão fixos no texto.
+                assert!(n.body.contains("5 min"), "corpo: {}", n.body);
+            }
+            _ => panic!("esperava WorkerCmd::Notify"),
+        }
+    }
+
+    #[test]
+    fn the_end_of_a_break_asks_for_the_back_to_focus_notice() {
+        let (mut app, rx) = test_app_with_worker();
+        app.pomodoro = Pomodoro::new(Duration::ZERO, Duration::ZERO);
+        app.pomodoro.toggle(Instant::now());
+
+        app.update(Msg::ClockTick); // fim do foco
+        let _ = rx.try_recv();
+        app.update(Msg::ClockTick); // fim do descanso
+
+        match rx.try_recv() {
+            Ok(WorkerCmd::Notify(n)) => assert!(n.title.contains("foco"), "título: {}", n.title),
+            _ => panic!("esperava o segundo WorkerCmd::Notify"),
+        }
+    }
+
+    #[test]
+    fn a_running_pomodoro_that_did_not_end_asks_for_nothing() {
+        // Sem isso, o painel mandaria uma notificação por segundo.
+        let (mut app, rx) = test_app_with_worker();
+        app.pomodoro = Pomodoro::new(Duration::from_secs(1500), Duration::from_secs(300));
+        app.pomodoro.toggle(Instant::now());
+        app.update(Msg::ClockTick);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_failed_notification_is_kept_to_be_shown_and_cleared_by_the_next_key() {
+        let mut app = test_app();
+        app.update(Msg::Notified(Err("sistema: sem servidor".into())));
+        assert_eq!(app.notify_error.as_deref(), Some("sistema: sem servidor"));
+
+        // Mexer no pomodoro limpa: o aviso velho não fica pendurado na caixa.
+        app.update(key(KeyCode::Char('P')));
+        assert!(app.notify_error.is_none());
+    }
+
+    #[test]
+    fn a_notification_that_worked_leaves_no_error_behind() {
+        let mut app = test_app();
+        app.notify_error = Some("velho".into());
+        app.update(Msg::Notified(Ok(())));
+        assert!(app.notify_error.is_none());
     }
 }
