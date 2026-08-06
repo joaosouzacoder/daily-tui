@@ -1,5 +1,7 @@
 //! Renderização: layout, painéis com rolagem, header do relógio e overlay.
 
+use std::time::Duration;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -10,6 +12,7 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use crate::ansi;
 use crate::app::{App, InputKind, Panel, Prompt, TaskField, TaskForm};
 use crate::clock;
+use crate::config;
 use chrono::Datelike;
 use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
@@ -67,7 +70,30 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
     }
 }
 
+/// Largura da caixa do pomodoro. Cabe `Descanso` + contador na linha de cima e
+/// `P pausar · R zerar` embaixo, que é a linha mais larga.
+const POMODORO_WIDTH: u16 = 22;
+
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    // Caixa desligada devolve a largura inteira ao relógio: quem não usa
+    // pomodoro não paga 22 colunas por ele.
+    let (clock_area, pomodoro_area) = if config::get().pomodoro.enabled {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(POMODORO_WIDTH)])
+            .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
+    render_clock(app, frame, clock_area);
+    if let Some(rect) = pomodoro_area {
+        render_pomodoro(app, frame, rect);
+    }
+}
+
+fn render_clock(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let time = clock::format_time(&app.now);
     let date = clock::format_date(&app.now);
@@ -90,15 +116,88 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
         .into_iter()
         .map(|r| Line::from(Span::styled(r, clock_style)))
         .collect();
-    frame.render_widget(
-        Paragraph::new(big).alignment(Alignment::Center),
-        rows[0],
-    );
+    frame.render_widget(Paragraph::new(big).alignment(Alignment::Center), rows[0]);
 
     frame.render_widget(
         Paragraph::new(Line::from(theme.muted(date))).alignment(Alignment::Center),
         rows[1],
     );
+}
+
+/// Tempo restante como `MM:SS`. Passando de uma hora segue contando em
+/// minutos: um pomodoro de 75 minutos é `75:00`, e um campo de hora só gastaria
+/// largura numa caixa que não tem.
+fn format_left(left: Duration) -> String {
+    let secs = left.as_secs();
+    format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+/// Barra do decorrido, com exatamente `width` colunas.
+fn progress_bar(elapsed: Duration, total: Duration, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if total.is_zero() {
+        return "░".repeat(width);
+    }
+    let ratio = (elapsed.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+fn render_pomodoro(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let p = &app.pomodoro;
+    let now = std::time::Instant::now();
+    let left = p.remaining(now);
+
+    // Nunca focado: o pomodoro não é painel, e `Tab` não passa por ele.
+    let inner = panel_inner(frame, theme, area, " POMODORO ".to_string(), false);
+    let width = inner.width as usize;
+
+    // Fase à esquerda, focos fechados à direita. Zero focos não mostra
+    // contador: `0 ✓` num pomodoro que nem começou é ruído.
+    let phase = if p.running() {
+        p.phase().label().to_string()
+    } else {
+        format!("{} (parado)", p.phase().label())
+    };
+    let count = if p.done() > 0 {
+        format!("{} ✓", p.done())
+    } else {
+        String::new()
+    };
+    let gap = width.saturating_sub(phase.chars().count() + count.chars().count());
+    let head = Line::from(vec![
+        // Mesmo destaque do relógio e dos cabeçalhos do Jira: o tema expõe
+        // `accent` como `Style`, não como construtor de `Span`.
+        Span::styled(phase, theme.accent.add_modifier(Modifier::BOLD)),
+        theme.muted(" ".repeat(gap)),
+        theme.muted(count),
+    ]);
+
+    // A última linha é a das dicas — a não ser que um aviso não tenha saído,
+    // caso em que a falha vale mais que a dica.
+    let foot = match &app.notify_error {
+        Some(_) => Line::from(theme.error("⚠ aviso não saiu")),
+        None => Line::from(theme.muted(format!(
+            "P {} · R zerar",
+            if p.running() { "pausar" } else { "iniciar" }
+        ))),
+    };
+
+    let lines = vec![
+        head,
+        Line::from(""),
+        Line::from(theme.span(format_left(left))),
+        Line::from(theme.muted(progress_bar(
+            p.total().saturating_sub(left),
+            p.total(),
+            width,
+        ))),
+        foot,
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Em que coluna cada painel mora e com que peso.
@@ -1050,6 +1149,8 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui_tea::Model;
     use std::sync::mpsc;
+    use crate::pomodoro::Pomodoro;
+    use std::time::{Duration, Instant};
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::channel();
@@ -1688,5 +1789,80 @@ mod tests {
     fn clip_truncates_with_ellipsis() {
         assert_eq!(clip("hello", 10), "hello");
         assert_eq!(clip("hello world", 5), "hell…");
+    }
+
+    #[test]
+    fn the_remaining_time_is_zero_padded_minutes_and_seconds() {
+        assert_eq!(format_left(Duration::from_secs(90)), "01:30");
+        assert_eq!(format_left(Duration::from_secs(25 * 60)), "25:00");
+        assert_eq!(format_left(Duration::ZERO), "00:00");
+        // Acima de uma hora segue em minutos: a caixa não tem espaço para
+        // um campo de hora que ninguém usa num pomodoro.
+        assert_eq!(format_left(Duration::from_secs(75 * 60)), "75:00");
+    }
+
+    #[test]
+    fn the_bar_fills_in_proportion_and_always_has_the_asked_width() {
+        let total = Duration::from_secs(100);
+        assert_eq!(progress_bar(Duration::ZERO, total, 10), "░░░░░░░░░░");
+        assert_eq!(progress_bar(Duration::from_secs(50), total, 10), "█████░░░░░");
+        assert_eq!(progress_bar(total, total, 10), "██████████");
+        for elapsed in [0, 33, 67, 100, 250] {
+            let bar = progress_bar(Duration::from_secs(elapsed), total, 10);
+            assert_eq!(bar.chars().count(), 10, "decorrido {elapsed}");
+        }
+    }
+
+    #[test]
+    fn a_zero_length_total_gives_an_empty_bar_instead_of_dividing_by_zero() {
+        assert_eq!(progress_bar(Duration::ZERO, Duration::ZERO, 4), "░░░░");
+        assert_eq!(progress_bar(Duration::ZERO, Duration::from_secs(60), 0), "");
+    }
+
+    #[test]
+    fn the_header_shows_the_pomodoro_next_to_the_clock() {
+        let app = test_app();
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("POMODORO"), "{out}");
+        // Parado no arranque, com o foco cheio e a dica de iniciar.
+        assert!(out.contains("25:00"), "{out}");
+        assert!(out.contains("iniciar"), "{out}");
+        // O relógio continua lá: a caixa foi somada ao header, não trocou nada.
+        // Parado e cheio, a barra está toda vazia (`░`), então os glifos
+        // grandes do relógio são a única fonte de `█` no header.
+        assert!(out.contains('█'), "{out}");
+    }
+
+    #[test]
+    fn a_running_pomodoro_offers_to_pause_instead_of_to_start() {
+        let mut app = test_app();
+        app.update(key(KeyCode::Char('P')));
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("pausar"), "{out}");
+    }
+
+    #[test]
+    fn the_finished_focus_count_only_shows_up_after_the_first_one() {
+        let mut app = test_app();
+        let out = render_to_string(&app, 100, 30);
+        assert!(!out.contains('✓'), "zero focos não mostra contador: {out}");
+
+        app.pomodoro = Pomodoro::new(Duration::ZERO, Duration::from_secs(300));
+        app.pomodoro.toggle(Instant::now());
+        app.update(Msg::ClockTick);
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("1 ✓"), "{out}");
+        assert!(out.contains("Descanso"), "{out}");
+    }
+
+    #[test]
+    fn a_notification_that_did_not_leave_takes_over_the_hint_line() {
+        // Engolir isso faria você confiar num aviso que não vem.
+        let mut app = test_app();
+        app.update(Msg::Notified(Err("sistema: sem servidor".into())));
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("aviso não saiu"), "{out}");
+        // `R zerar` só existe na linha de dicas: se ela cedeu o lugar, sai.
+        assert!(!out.contains("R zerar"), "a dica cede o lugar: {out}");
     }
 }
