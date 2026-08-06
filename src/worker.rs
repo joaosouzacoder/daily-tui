@@ -71,7 +71,7 @@ pub enum WorkerCmd {
     },
     /// Manda uma notificação. Roda aqui porque falar com o DBus ou subir um
     /// processo é I/O — no loop principal, travaria o relógio.
-    Notify(crate::notify::Notice),
+    Notify(crate::notice::Notice),
     /// Encerra a thread.
     Quit,
 }
@@ -166,7 +166,17 @@ pub fn spawn(
                     },
                 ),
                 Ok(WorkerCmd::Notify(notice)) => {
-                    let _ = ui.send(Msg::Notified(crate::notify::send(&notice)));
+                    // Numa thread própria: nem o refresh de dados prende a
+                    // notificação atrás da fila (`refresh_all` roda cinco CLIs
+                    // bloqueantes em sequência), nem uma notificação prende o
+                    // refresh atrás dela (`notify_rust::show()` bloqueia num
+                    // round-trip de DBus, ~25s de timeout com o daemon travado).
+                    // As duas direções de bloqueio existiam pelo mesmo motivo:
+                    // um canal `mpsc` só, com um consumidor só.
+                    let ui = ui.clone();
+                    std::thread::spawn(move || {
+                        let _ = ui.send(Msg::Notified(crate::notice::send(&notice)));
+                    });
                 }
                 Ok(WorkerCmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
             }

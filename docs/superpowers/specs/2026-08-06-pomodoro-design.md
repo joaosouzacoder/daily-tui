@@ -31,7 +31,7 @@ Jira) sem reescrever esta parte.
 - histórico ou persistência: fechar o painel esquece o contador de focos;
 - amarrar o pomodoro a uma tarefa do To Do;
 - som ou bell no terminal;
-- outros painéis usando o `notify` — o módulo nasce pronto para isso, mas nenhum
+- outros painéis usando o `notice` — o módulo nasce pronto para isso, mas nenhum
   chamador novo entra nesta mudança.
 
 ## Decisões registradas
@@ -58,6 +58,18 @@ Jira) sem reescrever esta parte.
   `P iniciar` quando parado e `P pausar` quando rodando, então o sufixo era
   redundante — e ele encostava na folga que a caixa de 20 colunas úteis tem
   contra o contador de dois dígitos, cortando o contador de focos em silêncio.
+- **A notificação nativa trouxe ~60 crates que o cliente HTTP rejeitado não
+  traria (achado da revisão final).** `notify-rust` com a feature `z` (zbus)
+  soma cerca de 60 dependências ao `Cargo.lock`, incluindo um executor
+  assíncrono completo (`async-io`, `async-executor`, `blocking`, `polling`,
+  `async-process`) num projeto deliberadamente sem async em lugar nenhum — a
+  mesma objeção usada acima para recusar um cliente HTTP no ntfy. A diferença
+  julgada é que o toast nativo é a preferência que o usuário pediu para este
+  canal, e não existe um único CLI (como o `curl` do ntfy) que cubra Windows,
+  macOS e Linux ao mesmo tempo. O custo não foi medido nem comparado quanto ao
+  do cliente HTTP — é uma escolha de trade-off, não um número. Se deixar de
+  valer a pena, a seção "Risco conhecido" já esboça a troca por subprocesso
+  por plataforma.
 
 ## Arquitetura
 
@@ -101,7 +113,7 @@ permite testar o encadeamento sem `sleep`.
 acabar um descanso: fase vira `Focus`, `deadline = None`, `left = focus`,
 devolve `Some(Break)`.
 
-### `src/notify.rs` — canal genérico
+### `src/notice.rs` — canal genérico
 
 ```rust
 pub struct Notice {
@@ -128,7 +140,7 @@ Sem tópico no config, o único canal é o nativo — e a falha dele aparece na 
 | Arquivo | Mudança |
 |---|---|
 | `src/msg.rs` | `Msg::Notified(Result<(), String>)` |
-| `src/worker.rs` | `WorkerCmd::Notify(Notice)` → `notify::send` → `Msg::Notified` |
+| `src/worker.rs` | `WorkerCmd::Notify(Notice)` → `notice::send` → `Msg::Notified` |
 | `src/app.rs` | campo `pomodoro: Pomodoro`, `notify_error: Option<String>`; `ClockTick` chama `tick` e manda o `Notify`; `P`/`R` em `handle_panel_key` |
 | `src/ui.rs` | `render_header` divide horizontalmente; `render_pomodoro` novo |
 | `src/config.rs` | `PomodoroCfg`, `NotifyCfg`, validação |
@@ -146,7 +158,7 @@ main.rs (1s)  ──Msg::ClockTick──▶  App::update
                                       │   Some(Phase) ?
                                       ▼
                               WorkerCmd::Notify(Notice)  ──▶  worker
-                                                                │ notify::send
+                                                                │ notice::send
                                                                 │   nativo → ntfy
                                       ◀──Msg::Notified(res)─────┘
                                       │
@@ -256,7 +268,7 @@ verdade do tempo, e a notificação é um efeito colateral dele.
 - a barra respeita a largura pedida e enche proporcionalmente;
 - fase cheia e fase vazia dão barra cheia e barra vazia.
 
-**`notify.rs`:** a montagem do `Notice` e dos argumentos do `curl` são funções
+**`notice.rs`:** a montagem do `Notice` e dos argumentos do `curl` são funções
 puras testáveis. O envio de verdade não entra em teste — depende de DBus, de
 toast do Windows e de rede.
 
@@ -265,6 +277,6 @@ toast do Windows e de rede.
 `notify-rust` no Windows depende de um AppUserModelID válido para o toast. Se na
 prática o toast não aparecer nesta máquina, o plano de implementação troca o
 módulo nativo por subprocesso por plataforma (`powershell` no Windows,
-`notify-send` no Linux, `osascript` no macOS) — a interface `notify::send` e
+`notify-send` no Linux, `osascript` no macOS) — a interface `notice::send` e
 tudo que depende dela ficam iguais. É por isso que o canal é um módulo com uma
 função, e não código espalhado no `app.rs`.

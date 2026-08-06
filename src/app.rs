@@ -17,7 +17,7 @@ use crate::data::tasks::SubTask;
 use crate::data::{notify, tasks};
 use crate::data::{Account, AgendaItem, EmailItem, TaskItem};
 use crate::msg::{EmailWriteKind, Msg};
-use crate::notify::Notice;
+use crate::notice::Notice;
 use crate::pomodoro::{Phase, Pomodoro};
 use crate::store::Store;
 use crate::ui;
@@ -446,6 +446,11 @@ pub struct App {
     /// Pomodoro do header. Estado em memória: fechar o painel esquece o
     /// contador de focos, e isso é aceito.
     pub pomodoro: Pomodoro,
+    /// Lido do config uma vez, como os tempos de foco/descanso: `enabled =
+    /// false` tem de desligar o cronômetro inteiro (tick e teclas), não só a
+    /// caixa — e `render_header` lê este mesmo campo, para a UI e o estado
+    /// nunca discordarem sobre se o recurso está ligado.
+    pub pomodoro_enabled: bool,
     /// Por que o último aviso não saiu, mostrado na caixa do pomodoro.
     pub notify_error: Option<String>,
     cmd_tx: Sender<WorkerCmd>,
@@ -494,6 +499,7 @@ impl App {
                     Duration::from_secs(cfg.rest * 60),
                 )
             },
+            pomodoro_enabled: config::get().pomodoro.enabled,
             notify_error: None,
             cmd_tx,
         }
@@ -1238,6 +1244,12 @@ impl App {
     /// Roda no `ClockTick` e não numa tecla: o aviso nasce do tempo passar, e
     /// tem de sair também quando você está com um overlay aberto.
     fn pomodoro_tick(&mut self, now: Instant) {
+        // Desligado no config, o cronômetro não deve rodar de jeito nenhum —
+        // só esconder a caixa deixaria um timer invisível avisando por baixo
+        // dos panos de um recurso que a pessoa apagou.
+        if !self.pomodoro_enabled {
+            return;
+        }
         let Some(ended) = self.pomodoro.tick(now) else {
             return;
         };
@@ -1291,11 +1303,13 @@ impl App {
             // Maiúsculas e globais: o pomodoro vive no header, não é painel, e
             // não deve exigir foco. `p` minúsculo já é do painel de Jira, e `r`
             // minúsculo já é o refresh global — daí as maiúsculas aqui.
-            KeyCode::Char('P') => {
+            // Guardadas por `pomodoro_enabled`: sem isso, `Shift+P` de hábito
+            // armaria um timer que não aparece em lugar nenhum da tela.
+            KeyCode::Char('P') if self.pomodoro_enabled => {
                 self.pomodoro.toggle(Instant::now());
                 self.notify_error = None;
             }
-            KeyCode::Char('R') => {
+            KeyCode::Char('R') if self.pomodoro_enabled => {
                 self.pomodoro.reset();
                 self.notify_error = None;
             }
@@ -1433,8 +1447,10 @@ impl Model for App {
                     detail.body = Some(res);
                 }
             }
-            // Genérico de propósito (título + corpo, nada de painel): quem sabe
-            // o que fazer com a falha é quem manda a notificação.
+            // Hoje o único chamador é o pomodoro, e por isso a falha vai direto
+            // para `notify_error`, o campo que a caixa dele mostra. Um segundo
+            // chamador do canal genérico vai precisar de rota própria aqui —
+            // esta linha sozinha não distingue de quem veio o aviso.
             Msg::Notified(res) => self.notify_error = res.err(),
         }
         Cmd::none()
@@ -2872,6 +2888,25 @@ mod tests {
         app.pomodoro.toggle(Instant::now());
         app.update(Msg::ClockTick);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_disabled_pomodoro_ignores_the_keys_and_ticks_silently() {
+        // `enabled = false` tem de desligar o cronômetro inteiro, não só a
+        // caixa: senão `Shift+P` de hábito arma um timer invisível que avisa
+        // por baixo dos panos 25 minutos depois.
+        let (mut app, rx) = test_app_with_worker();
+        app.pomodoro_enabled = false;
+        app.pomodoro = Pomodoro::new(Duration::ZERO, Duration::from_secs(300));
+
+        app.update(key(KeyCode::Char('P')));
+        assert!(!app.pomodoro.running(), "P não deve armar o timer");
+
+        app.update(Msg::ClockTick);
+        assert!(
+            rx.try_recv().is_err(),
+            "sem timer rodando, o tick não pede notificação nenhuma"
+        );
     }
 
     #[test]

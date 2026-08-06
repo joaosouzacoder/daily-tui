@@ -6,7 +6,7 @@ mod clock;
 mod config;
 mod data;
 mod msg;
-mod notify;
+mod notice;
 mod pomodoro;
 mod store;
 mod ui;

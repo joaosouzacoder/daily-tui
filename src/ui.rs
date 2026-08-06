@@ -12,7 +12,6 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use crate::ansi;
 use crate::app::{App, InputKind, Panel, Prompt, TaskField, TaskForm};
 use crate::clock;
-use crate::config;
 use chrono::Datelike;
 use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
@@ -74,18 +73,31 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
 /// `P pausar · R zerar` embaixo, que é a linha mais larga.
 const POMODORO_WIDTH: u16 = 22;
 
+/// Largura mínima do header inteiro para a caixa do pomodoro aparecer.
+///
+/// O relógio grande sozinho precisa de uns 29 colunas (`HH:MM:SS`: seis
+/// dígitos de 3 colunas, dois `:` de 1, espaçamento entre glifos e a borda do
+/// bloco) — some `POMODORO_WIDTH` e o mínimo real já passa de 50. 60 dá uma
+/// folga sem depender do segundo exato do relógio: abaixo disso, a caixa cede
+/// o espaço de volta para o widget que o header existe para mostrar.
+const MIN_WIDTH_FOR_POMODORO: u16 = 60;
+
 fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
-    // Caixa desligada devolve a largura inteira ao relógio: quem não usa
-    // pomodoro não paga 22 colunas por ele.
-    let (clock_area, pomodoro_area) = if config::get().pomodoro.enabled {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(POMODORO_WIDTH)])
-            .split(area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (area, None)
-    };
+    // Caixa desligada, ou terminal estreito demais para as duas coisas,
+    // devolve a largura inteira ao relógio. `app.pomodoro_enabled` é a mesma
+    // fonte de verdade que trava o tick e as teclas em `app.rs` — ler o config
+    // aqui de novo poderia divergir e mostrar uma caixa que o estado diz que
+    // está desligada.
+    let (clock_area, pomodoro_area) =
+        if app.pomodoro_enabled && area.width >= MIN_WIDTH_FOR_POMODORO {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(POMODORO_WIDTH)])
+                .split(area);
+            (cols[0], Some(cols[1]))
+        } else {
+            (area, None)
+        };
 
     render_clock(app, frame, clock_area);
     if let Some(rect) = pomodoro_area {
@@ -180,26 +192,29 @@ fn render_pomodoro(app: &App, frame: &mut Frame<'_>, area: Rect) {
         theme.muted(count),
     ]);
 
-    // A última linha é a das dicas — a não ser que um aviso não tenha saído,
-    // caso em que a falha vale mais que a dica.
-    let foot = match &app.notify_error {
+    // A linha de dicas é o único sinal de rodando/parado (o sufixo `(parado)`
+    // na fase foi removido de propósito) — ela não pode sumir, nem quando o
+    // aviso falha. O aviso ocupa a linha em branco entre a fase e o tempo, que
+    // não carrega informação nenhuma quando não há nada a dizer.
+    let warning = match &app.notify_error {
         Some(_) => Line::from(theme.error("⚠ aviso não saiu")),
-        None => Line::from(theme.muted(format!(
-            "P {} · R zerar",
-            if p.running() { "pausar" } else { "iniciar" }
-        ))),
+        None => Line::from(""),
     };
+    let hint = Line::from(theme.muted(format!(
+        "P {} · R zerar",
+        if p.running() { "pausar" } else { "iniciar" }
+    )));
 
     let lines = vec![
         head,
-        Line::from(""),
+        warning,
         Line::from(theme.span(format_left(left))),
         Line::from(theme.muted(progress_bar(
             p.total().saturating_sub(left),
             p.total(),
             width,
         ))),
-        foot,
+        hint,
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1838,6 +1853,20 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_terminal_keeps_the_clock_and_drops_the_pomodoro_box() {
+        // Abaixo de MIN_WIDTH_FOR_POMODORO, `Constraint::Min(0)` para o relógio
+        // e `Constraint::Length(22)` para a caixa colapsariam o relógio a zero
+        // colunas — o acessório expulsando o widget que o header existe para
+        // mostrar.
+        let app = test_app();
+        let out = render_to_string(&app, 40, 30);
+        assert!(!out.contains("POMODORO"), "{out}");
+        // O relógio grande usa `█`/`░`; sem a caixa disputando espaço, ele
+        // ainda desenha os glifos por extenso.
+        assert!(out.contains('█'), "{out}");
+    }
+
+    #[test]
     fn a_running_pomodoro_offers_to_pause_instead_of_to_start() {
         let mut app = test_app();
         app.update(key(KeyCode::Char('P')));
@@ -1860,14 +1889,15 @@ mod tests {
     }
 
     #[test]
-    fn a_notification_that_did_not_leave_takes_over_the_hint_line() {
-        // Engolir isso faria você confiar num aviso que não vem.
+    fn a_notification_that_did_not_leave_shows_up_without_hiding_the_hint() {
+        // Engolir isso faria você confiar num aviso que não vem. E a dica é o
+        // único sinal de rodando/parado desde que o sufixo `(parado)` saiu da
+        // fase — perder as duas ao mesmo tempo era o achado da revisão final.
         let mut app = test_app();
         app.update(Msg::Notified(Err("sistema: sem servidor".into())));
         let out = render_to_string(&app, 100, 30);
         assert!(out.contains("aviso não saiu"), "{out}");
-        // `R zerar` só existe na linha de dicas: se ela cedeu o lugar, sai.
-        assert!(!out.contains("R zerar"), "a dica cede o lugar: {out}");
+        assert!(out.contains("R zerar"), "a dica continua visível: {out}");
     }
 
     #[test]

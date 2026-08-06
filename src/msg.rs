@@ -16,6 +16,13 @@ pub enum EmailWriteKind {
 
 /// Eventos processados pelo modelo. Precisa ser `Send + 'static` para
 /// trafegar do worker para o loop principal via `ratatui_tea::channel`.
+///
+/// `Clone` porque `ProgramHandle<Msg>` só ganha `Clone` quando `Msg` também
+/// tem — o `derive` da lib exige o bound no parâmetro genérico mesmo o campo
+/// interno (`Sender<M>`) não precisando dele. Sem isso, a notificação do
+/// pomodoro não teria como rodar numa thread própria sem travar o worker
+/// atrás dela.
+#[derive(Clone)]
 pub enum Msg {
     /// Pulso de relógio (1s) — força redesenho do header.
     ClockTick,
