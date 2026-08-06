@@ -1903,9 +1903,18 @@ mod tests {
         // largura interna da caixa (POMODORO_WIDTH menos as duas bordas), ou o
         // widget corta em silêncio — o mesmo defeito do achado acima, mas
         // verificado como invariante em vez de um único valor fixo.
+        //
+        // A invariante é exata (soma == largura, sem sobra) em `u32::MAX`: com
+        // `"Descanso"` (8) e um contador de 10 dígitos (12), 8 + 12 = 20. Sem
+        // um valor colado nessa borda, uma regressão que acrescentasse um único
+        // caractere fixo ao formato de `done_counter` (um espaço de mais, um
+        // separador mais largo) passaria despercebida em `done = 999` — a soma
+        // ficaria 13/20, longe do limite — e só estouraria a largura real da
+        // caixa nos valores grandes. `999_999_999` (9 dígitos) fica a 1 caractere
+        // da borda, e `u32::MAX` fica exatamente nela.
         let inner_width = POMODORO_WIDTH as usize - 2;
         for label in [Phase::Focus.label(), Phase::Break.label()] {
-            for done in [0, 1, 9, 10, 99, 999] {
+            for done in [0, 1, 9, 10, 99, 999, 999_999_999, u32::MAX] {
                 let count = done_counter(done);
                 assert!(
                     label.chars().count() + count.chars().count() <= inner_width,
