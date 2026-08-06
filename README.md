@@ -58,6 +58,7 @@ ferramenta dele.
 - [Comece aqui](#comece-aqui)
 - [Instalação rápida](#instalação-rápida)
 - [Config: painéis e contas](#config-painéis-e-contas)
+  - Pomodoro
 - [O que é instalado (e por quê)](#o-que-é-instalado-e-por-quê)
 - [Configuração das contas](#configuração-das-contas) — **a parte que dá trabalho**
   - 1. E-mail (ortie + himalaya)
@@ -213,6 +214,36 @@ Três coisas que valem saber:
   Nome de campo errado também é erro, com o nome do campo na mensagem.
 - **Nenhum segredo vai no config.** `JIRA_TOKEN` e `GITHUB_TOKEN` continuam no
   ambiente ou no keychain.
+
+### Pomodoro
+
+```toml
+[pomodoro]
+enabled = true
+focus   = 25   # minutos de foco
+rest    = 5    # minutos de descanso
+
+[notify]
+ntfy_topic = ""
+```
+
+A caixa fica à direita do relógio, mostrando a fase (`Foco` ou `Descanso`), o
+tempo restante e uma barra de progresso. `P` inicia e pausa, `R` zera a fase
+atual sem apagar o contador de focos já fechados. Quando o foco acaba, o
+descanso já começa a contar; quando o descanso acaba, o painel volta ao foco e
+espera você apertar `P`.
+
+`focus` e `rest` são minutos e têm de ser maiores que zero. `enabled = false`
+devolve o header inteiro ao relógio.
+
+O contador de focos vive em memória: fechar o painel esquece quantos você fez.
+
+**O aviso.** A cada virada de fase o painel manda uma notificação do sistema
+(Windows, macOS e Linux). Se ela falhar e `[notify].ntfy_topic` estiver
+preenchido, o mesmo aviso sai por [ntfy.sh](https://ntfy.sh) como reserva —
+útil quando o push tem de chegar no celular. Sem tópico, o único canal é o do
+sistema, e uma falha aparece como `⚠ aviso não saiu` na própria caixa. O ntfy
+vai por `curl`, que precisa estar no PATH.
 
 ---
 
@@ -491,6 +522,8 @@ resto do painel continua funcionando.
 | `Enter`        | Abre o item do painel focado             |
 | `Esc`          | Fecha o detalhe / cancela o prompt      |
 | `r`            | Atualiza os dados agora                 |
+| `P`            | Inicia/pausa o pomodoro                 |
+| `R`            | Zera a fase do pomodoro (mantém os focos já fechados) |
 | `q` / `Ctrl-C` | Sai                                     |
 
 O rodapé mostra as teclas do painel em foco, então não é preciso decorar.

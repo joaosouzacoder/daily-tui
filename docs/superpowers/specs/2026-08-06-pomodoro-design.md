@@ -54,6 +54,10 @@ Jira) sem reescrever esta parte.
   traria TLS e um bloco de dependências para uma única requisição de uma linha.
 - **Falha de notificação não é engolida.** Achar que vai ser avisado e não ser é
   o pior defeito possível aqui.
+- **Sem sufixo `(parado)` na fase (revisão do task 5).** A linha de dicas já diz
+  `P iniciar` quando parado e `P pausar` quando rodando, então o sufixo era
+  redundante — e ele encostava na folga que a caixa de 20 colunas úteis tem
+  contra o contador de dois dígitos, cortando o contador de focos em silêncio.
 
 ## Arquitetura
 
@@ -170,7 +174,8 @@ Com `enabled = false`, o relógio recebe a largura inteira e nada mais muda.
 └────────────────────────────────┘└────────────────────┘
 ```
 
-- **Fase:** `Foco` ou `Descanso`. Parado, vira `Foco (parado)`.
+- **Fase:** `Foco` ou `Descanso`, sem sufixo para o estado parado — a linha de
+  dicas já diz `P iniciar`/`P pausar`.
 - **Contador:** focos concluídos, à direita. Zero focos não mostra nada.
 - **Tempo:** `MM:SS`, texto normal (o relógio grande ao lado já é o destaque).
 - **Barra:** cheia proporcional ao decorrido da fase.
