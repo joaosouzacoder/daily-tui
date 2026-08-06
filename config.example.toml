@@ -50,3 +50,15 @@ client_id = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 
 [refresh]
 seconds = 300   # de quanto em quanto tempo tudo é rebuscado
+
+# Pomodoro na caixa ao lado do relógio. `P` inicia/pausa, `R` zera a fase.
+[pomodoro]
+enabled = true
+focus   = 25   # minutos de foco
+rest    = 5    # minutos de descanso
+
+# Como o painel avisa quando a fase do pomodoro vira.
+[notify]
+# Vazio = só a notificação do sistema. Com um tópico do ntfy.sh, ele entra como
+# reserva quando a notificação do sistema falha.
+ntfy_topic = ""

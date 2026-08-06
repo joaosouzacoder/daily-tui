@@ -34,6 +34,10 @@ pub struct Config {
     pub tasks: TasksCfg,
     #[serde(default)]
     pub refresh: RefreshCfg,
+    #[serde(default)]
+    pub pomodoro: PomodoroCfg,
+    #[serde(default)]
+    pub notify: NotifyCfg,
 }
 
 impl Default for Config {
@@ -45,6 +49,8 @@ impl Default for Config {
             jira: JiraCfg::default(),
             tasks: TasksCfg::default(),
             refresh: RefreshCfg::default(),
+            pomodoro: PomodoroCfg::default(),
+            notify: NotifyCfg::default(),
         }
     }
 }
@@ -191,6 +197,46 @@ impl Default for RefreshCfg {
     }
 }
 
+/// Pomodoro do header. Tempos em minutos: é a unidade em que se pensa um
+/// pomodoro, e segundos no config só convidariam a erro de digitação.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PomodoroCfg {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    #[serde(default = "default_focus")]
+    pub focus: u64,
+    #[serde(default = "default_rest")]
+    pub rest: u64,
+}
+
+const fn default_focus() -> u64 {
+    25
+}
+
+const fn default_rest() -> u64 {
+    5
+}
+
+impl Default for PomodoroCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            focus: default_focus(),
+            rest: default_rest(),
+        }
+    }
+}
+
+/// Canal de notificação. Vazio = só a notificação do sistema; com tópico, o
+/// ntfy.sh entra quando a do sistema falha.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyCfg {
+    #[serde(default)]
+    pub ntfy_topic: String,
+}
+
 /// Parseia e valida. O erro é uma linha, para caber no stderr.
 fn parse(raw: &str) -> Result<Config, String> {
     let cfg: Config = toml::from_str(raw).map_err(|e| {
@@ -216,6 +262,14 @@ impl Config {
     fn validate(&self) -> Result<(), String> {
         if !self.panels.any() {
             return Err("nenhum painel ligado: o [panels] desligou todos".into());
+        }
+        // Fase de zero minuto viraria a cada tick: uma rajada de notificações
+        // que só para quando o painel fecha.
+        if self.pomodoro.focus == 0 {
+            return Err("[pomodoro] focus tem de ser maior que zero".into());
+        }
+        if self.pomodoro.rest == 0 {
+            return Err("[pomodoro] rest tem de ser maior que zero".into());
         }
         match self.accounts.len() {
             0 => Err("nenhuma conta configurada: e-mail e agenda ficariam vazios".into()),
@@ -321,6 +375,42 @@ mod tests {
         assert_eq!(cfg.accounts[1].label, "P");
         assert_eq!(cfg.email.limit, 30);
         assert_eq!(cfg.refresh.seconds, 300);
+        assert_eq!(cfg.pomodoro.focus, 25);
+        assert_eq!(cfg.pomodoro.rest, 5);
+    }
+
+    #[test]
+    fn an_empty_file_gives_the_classic_twenty_five_five_pomodoro() {
+        let cfg = parse("").expect("vazio é válido");
+        assert!(cfg.pomodoro.enabled);
+        assert_eq!(cfg.pomodoro.focus, 25);
+        assert_eq!(cfg.pomodoro.rest, 5);
+        // Sem tópico, o único canal é a notificação do sistema.
+        assert!(cfg.notify.ntfy_topic.is_empty());
+    }
+
+    #[test]
+    fn the_pomodoro_times_come_from_the_file() {
+        let cfg = parse("[pomodoro]\nfocus = 50\nrest = 10\n").unwrap();
+        assert_eq!(cfg.pomodoro.focus, 50);
+        assert_eq!(cfg.pomodoro.rest, 10);
+        // Campo omitido não desliga a caixa.
+        assert!(cfg.pomodoro.enabled);
+    }
+
+    #[test]
+    fn a_zero_length_phase_is_refused_with_the_field_named() {
+        // Fase de zero minuto viraria a cada tick: um laço de notificações.
+        let err = parse("[pomodoro]\nfocus = 0\n").unwrap_err();
+        assert!(err.contains("focus"), "o erro nomeia o campo: {err}");
+        let err = parse("[pomodoro]\nrest = 0\n").unwrap_err();
+        assert!(err.contains("rest"), "o erro nomeia o campo: {err}");
+    }
+
+    #[test]
+    fn the_ntfy_topic_comes_from_the_notify_section() {
+        let cfg = parse("[notify]\nntfy_topic = \"meutopico\"\n").unwrap();
+        assert_eq!(cfg.notify.ntfy_topic, "meutopico");
     }
 
     #[test]
