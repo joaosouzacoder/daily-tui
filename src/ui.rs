@@ -348,26 +348,19 @@ fn issue_line(
     // O tipo vem antes da chave: é o que diz se a linha é uma história do dia a
     // dia ou uma iniciativa acima dela, e lido em coluna se compara de relance.
     let kind = item.type_marker();
-    let mut spans = vec![
-        theme.muted(format!("{indent}{kind} ")),
-        theme.accent(item.key.clone()),
-        theme.muted(format!(" [{}] ", item.status)),
-    ];
+    let mut spans = vec![theme.muted(format!("{indent}{kind} "))];
     // No filtro `ambas`, marca só o que **não** é seu para fazer: sem marcador
-    // significa "é sua". Marcar as duas coisas dava três grupos de colchetes na
-    // mesma linha, todos esmaecidos — e nada saltava.
-    //
-    // `[rel]` e não `[R]`: `[R]` é o marcador de *tipo* de uma requisição, e as
-    // duas coisas apareceram na mesma linha em dado real, significando coisas
-    // diferentes com a mesma letra. Nenhum tipo tem três letras.
+    // significa "é sua". `REL` vem antes da chave, em verde — a mesma marca do
+    // `jirapending`, e não `[rel]`: some por completo quando você também é
+    // responsável, em vez de disputar espaço com o tipo e o status entre colchetes.
     let role = if show_role && item.role == jira::JiraRole::Reporter {
-        // Em cor de erro, não em `muted`: é o único jeito de a exceção saltar
-        // numa linha que já tem tipo e status entre colchetes.
-        spans.push(theme.error("[rel] "));
-        6
+        spans.push(theme.success("REL "));
+        4
     } else {
         0
     };
+    spans.push(theme.accent(item.key.clone()));
+    spans.push(theme.muted(format!(" [{}] ", item.status)));
     let summary_width = room_for(
         avail,
         indent.chars().count()
@@ -1174,7 +1167,7 @@ mod tests {
             .map(|y| (0..120).map(|x| buf[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(out.contains("JIRA · minhas"), "cabeçalho com o filtro ativo");
+        assert!(out.contains("JIRA · ambas"), "cabeçalho com o filtro ativo");
         assert!(out.contains("ENG"), "cabeçalho de grupo do projeto");
         assert!(out.contains("ENG-101"), "a chave da issue");
     }
@@ -1220,9 +1213,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("falta a linha de {needle}"))
                 .to_string()
         };
-        assert!(line("ENG-2").contains("[rel]"), "só relator é marcado");
-        assert!(!line("ENG-1").contains("[rel]"), "a sua não leva marca");
-        assert!(!line("ENG-3").contains("[rel]"), "nem a que é sua e você relatou");
+        assert!(line("ENG-2").contains("REL "), "só relator é marcado");
+        assert!(!line("ENG-1").contains("REL "), "a sua não leva marca");
+        assert!(!line("ENG-3").contains("REL "), "nem a que é sua e você relatou");
     }
 
     #[test]
@@ -1242,8 +1235,8 @@ mod tests {
             .find(|l| l.contains("PDS-1"))
             .expect("linha")
             .to_string();
-        assert!(line.contains("[R] PDS-1"), "o tipo requisição segue sendo [R]");
-        assert!(line.contains("[rel]"), "e o papel tem marcador próprio");
+        assert!(line.contains("[R] "), "o tipo requisição segue sendo [R]");
+        assert!(line.contains("REL PDS-1"), "e o papel tem marcador próprio, antes da chave");
     }
 
     #[test]
@@ -1255,8 +1248,9 @@ mod tests {
         )
         .unwrap();
         app.jira.loaded = true;
+        app.jira_filter = crate::data::jira::JiraFilter::Assignee;
         // Filtro `minhas`: toda issue tem o mesmo papel, e a marca seria ruído.
-        assert!(!render_to_string(&app, 120, 30).contains("[rel]"));
+        assert!(!render_to_string(&app, 120, 30).contains("REL "));
     }
 
     #[test]

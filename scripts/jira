@@ -33,14 +33,18 @@ TIMEOUT = 30
 ORDER = "ORDER BY project ASC, updated DESC"
 FIELDS = ["summary", "status", "project", "parent", "assignee", "reporter", "issuetype"]
 
-# Cláusulas por modo de filtro. O modo `reporter` NÃO usa `statusCategory != Done`
-# como os outros: essa combinação devolve mais de 100 issues, quase todas de um
-# projeto só (medido em 2026-08-03). Ver o spec, seção "Revisões guiadas por dado".
+# Cláusulas por modo de filtro. `reporter` exclui quem também é assignee: essas
+# já aparecem em `assignee`, e sem essa exclusão uma issue "both" entrava nos
+# dois filtros, cada um listando um papel que a pessoa não sente como só seu.
+# `assignee != currentUser()` sozinho segue a semântica de NULL do JQL e some
+# com as issues sem assignee — por isso o `OR assignee is EMPTY`.
 FILTERS = {
     "assignee": "assignee = currentUser() AND statusCategory != Done",
-    "reporter": "reporter = currentUser() AND statusCategory = 'In Progress'",
-    "both": "(assignee = currentUser() AND statusCategory != Done)"
-            " OR (reporter = currentUser() AND statusCategory = 'In Progress')",
+    "reporter": "reporter = currentUser()"
+                " AND (assignee != currentUser() OR assignee is EMPTY)"
+                " AND statusCategory != Done",
+    "both": "(assignee = currentUser() OR reporter = currentUser())"
+            " AND statusCategory != Done",
 }
 
 

@@ -2177,20 +2177,20 @@ mod tests {
     #[test]
     fn f_cycles_the_jira_filter_only_when_jira_is_focused() {
         let mut app = test_app();
-        assert_eq!(app.jira_filter, JiraFilter::Assignee);
+        assert_eq!(app.jira_filter, JiraFilter::Both);
 
         // Sem foco no Jira, `f` não faz nada.
         app.update(key(KeyCode::Char('f')));
-        assert_eq!(app.jira_filter, JiraFilter::Assignee);
+        assert_eq!(app.jira_filter, JiraFilter::Both);
 
         app.update(key(KeyCode::Tab)); // Email -> Jira
         assert_eq!(app.focus, Panel::Jira);
         app.update(key(KeyCode::Char('f')));
+        assert_eq!(app.jira_filter, JiraFilter::Assignee);
+        app.update(key(KeyCode::Char('f')));
         assert_eq!(app.jira_filter, JiraFilter::Reporter);
         app.update(key(KeyCode::Char('f')));
-        assert_eq!(app.jira_filter, JiraFilter::Both);
-        app.update(key(KeyCode::Char('f')));
-        assert_eq!(app.jira_filter, JiraFilter::Assignee, "o ciclo volta ao início");
+        assert_eq!(app.jira_filter, JiraFilter::Both, "o ciclo volta ao início");
     }
 
     #[test]
