@@ -252,4 +252,22 @@ mod tests {
         assert_eq!(Phase::Focus.label(), "Foco");
         assert_eq!(Phase::Break.label(), "Descanso");
     }
+
+    #[test]
+    fn waking_from_sleep_arms_the_next_phase_from_now_not_from_the_stale_deadline() {
+        // Sem armação a partir de `now`, a máquina que acorda de uma hora de sono
+        // dispararia vários descansos seguidos — uma rajada de transições que você
+        // não trabalhou para passar.
+        let now = Instant::now();
+        let mut p = Pomodoro::new(Duration::ZERO, REST);
+        p.toggle(now);
+        // Ticking uma hora depois da deadline (que seria `now + 0`).
+        let much_later = now + Duration::from_secs(3600);
+        assert_eq!(p.tick(much_later), Some(Phase::Focus));
+        // O descanso acaba de começar. Se fosse armado do prazo antigo
+        // (now + 0), o deadline seria (now + 0) + REST = now + REST, e
+        // remaining() mostraria menos que REST. Se armado de `now` (correto),
+        // seria much_later + REST, e remaining() mostra o tempo cheio.
+        assert_eq!(p.remaining(much_later), REST);
+    }
 }
