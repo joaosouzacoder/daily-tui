@@ -218,6 +218,11 @@ const fn default_rest() -> u64 {
     5
 }
 
+/// Teto de uma fase, em minutos (24h). Sem ele, um typo como `focus = 2500`
+/// (querendo dizer "25,00") rende `2500:00`, que estoura os 20 caracteres úteis
+/// da caixa e corta em silêncio.
+const MAX_POMODORO_MINUTES: u64 = 24 * 60;
+
 impl Default for PomodoroCfg {
     fn default() -> Self {
         Self {
@@ -270,6 +275,12 @@ impl Config {
         }
         if self.pomodoro.rest == 0 {
             return Err("[pomodoro] rest tem de ser maior que zero".into());
+        }
+        if self.pomodoro.focus > MAX_POMODORO_MINUTES {
+            return Err("[pomodoro] focus não pode passar de 1440 minutos (24h)".into());
+        }
+        if self.pomodoro.rest > MAX_POMODORO_MINUTES {
+            return Err("[pomodoro] rest não pode passar de 1440 minutos (24h)".into());
         }
         match self.accounts.len() {
             0 => Err("nenhuma conta configurada: e-mail e agenda ficariam vazios".into()),
@@ -404,6 +415,16 @@ mod tests {
         let err = parse("[pomodoro]\nfocus = 0\n").unwrap_err();
         assert!(err.contains("focus"), "o erro nomeia o campo: {err}");
         let err = parse("[pomodoro]\nrest = 0\n").unwrap_err();
+        assert!(err.contains("rest"), "o erro nomeia o campo: {err}");
+    }
+
+    #[test]
+    fn a_phase_over_twenty_four_hours_is_refused_with_the_field_named() {
+        // `focus = 2500` (typo de "25,00") renderizaria `2500:00`, estourando
+        // a caixa de 20 colunas em silêncio.
+        let err = parse("[pomodoro]\nfocus = 2500\n").unwrap_err();
+        assert!(err.contains("focus"), "o erro nomeia o campo: {err}");
+        let err = parse("[pomodoro]\nrest = 1441\n").unwrap_err();
         assert!(err.contains("rest"), "o erro nomeia o campo: {err}");
     }
 
