@@ -145,6 +145,16 @@ fn progress_bar(elapsed: Duration, total: Duration, width: usize) -> String {
     format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
 }
 
+/// Contador de focos fechados, pronto para a linha de cabeçalho da caixa.
+/// Zero focos não mostra nada: `0 ✓` num pomodoro que nem começou é ruído.
+fn done_counter(done: u32) -> String {
+    if done > 0 {
+        format!("{} ✓", done)
+    } else {
+        String::new()
+    }
+}
+
 fn render_pomodoro(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let p = &app.pomodoro;
@@ -155,18 +165,12 @@ fn render_pomodoro(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let inner = panel_inner(frame, theme, area, " POMODORO ".to_string(), false);
     let width = inner.width as usize;
 
-    // Fase à esquerda, focos fechados à direita. Zero focos não mostra
-    // contador: `0 ✓` num pomodoro que nem começou é ruído.
-    let phase = if p.running() {
-        p.phase().label().to_string()
-    } else {
-        format!("{} (parado)", p.phase().label())
-    };
-    let count = if p.done() > 0 {
-        format!("{} ✓", p.done())
-    } else {
-        String::new()
-    };
+    // Fase à esquerda, focos fechados à direita.
+    // Sem sufixo de "parado": a linha de dicas já diz `P iniciar` quando
+    // parado e `P pausar` quando rodando — repetir o estado aqui só encurtava
+    // a folga da caixa contra o contador de dois dígitos (revisão do task 5).
+    let phase = p.phase().label().to_string();
+    let count = done_counter(p.done());
     let gap = width.saturating_sub(phase.chars().count() + count.chars().count());
     let head = Line::from(vec![
         // Mesmo destaque do relógio e dos cabeçalhos do Jira: o tema expõe
@@ -1149,7 +1153,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui_tea::Model;
     use std::sync::mpsc;
-    use crate::pomodoro::Pomodoro;
+    use crate::pomodoro::{Phase, Pomodoro};
     use std::time::{Duration, Instant};
 
     fn test_app() -> App {
@@ -1864,5 +1868,50 @@ mod tests {
         assert!(out.contains("aviso não saiu"), "{out}");
         // `R zerar` só existe na linha de dicas: se ela cedeu o lugar, sai.
         assert!(!out.contains("R zerar"), "a dica cede o lugar: {out}");
+    }
+
+    #[test]
+    fn a_stopped_break_with_a_double_digit_count_still_shows_the_full_counter() {
+        // Achado da revisão: com o sufixo `(parado)`, `"Descanso (parado)"`
+        // (17) + `"10 ✓"` (4) passava dos 20 de largura interna e o contador
+        // saía cortado, sem que nenhum teste percebesse — um dia comum com 10
+        // focos fechados, não uma borda rara.
+        let now = Instant::now();
+        let mut p = Pomodoro::new(Duration::ZERO, Duration::ZERO);
+        for _ in 0..9 {
+            p.toggle(now); // arma o foco
+            p.tick(now); // fecha o foco, entra no descanso (rodando)
+            p.tick(now); // fecha o descanso, volta ao foco (parado)
+        }
+        p.toggle(now); // arma o décimo foco
+        p.tick(now); // fecha o décimo foco: done vira 10, entra no descanso
+        p.toggle(now); // pausa o descanso
+        assert_eq!(p.done(), 10);
+        assert_eq!(p.phase(), Phase::Break);
+        assert!(!p.running());
+
+        let mut app = test_app();
+        app.pomodoro = p;
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("10 ✓"), "{out}");
+        assert!(out.contains("Descanso"), "{out}");
+    }
+
+    #[test]
+    fn the_head_line_never_outgrows_the_boxs_inner_width_even_with_many_focuses() {
+        // Propriedade direta: rótulo de fase + contador não podem passar da
+        // largura interna da caixa (POMODORO_WIDTH menos as duas bordas), ou o
+        // widget corta em silêncio — o mesmo defeito do achado acima, mas
+        // verificado como invariante em vez de um único valor fixo.
+        let inner_width = POMODORO_WIDTH as usize - 2;
+        for label in [Phase::Focus.label(), Phase::Break.label()] {
+            for done in [0, 1, 9, 10, 99, 999] {
+                let count = done_counter(done);
+                assert!(
+                    label.chars().count() + count.chars().count() <= inner_width,
+                    "fase {label:?} com {done} focos: {count:?} não cabe em {inner_width}"
+                );
+            }
+        }
     }
 }
