@@ -1,0 +1,114 @@
+# Próximo compromisso no header
+
+**Data:** 2026-08-07
+**Status:** aprovado
+
+## Objetivo
+
+Uma linha no header dizendo qual é o próximo compromisso e quanto falta para ele.
+
+Nasceu ao lado do pomodoro e por causa dele: não faz sentido apertar `P` e
+começar um bloco de foco de 25 minutos com reunião em 10. O painel de agenda já
+mostra a semana, mas responder "posso começar agora?" exigia procurar na lista.
+
+## Escopo
+
+**Dentro:** a linha no header, derivada do que a agenda já busca — o próximo
+evento com hora marcada dentro dos 7 dias que o `gcalcli` traz.
+
+**Fora:**
+
+- busca nova ou CLI novo: tudo sai de `app.agenda.items`, já em memória;
+- eventos de dia inteiro — não colidem com um bloco de foco;
+- saber se um evento está **acontecendo agora**: o `AgendaItem` guarda só o
+  início, não o fim, e inventar duração seria mentira;
+- qualquer ação sobre o compromisso (abrir, entrar na call, recusar);
+- alerta sonoro ou notificação — o pomodoro já tem canal para isso, e ninguém
+  pediu aviso de reunião.
+
+## Decisões registradas
+
+- **O header cresce de 8 para 9 linhas.** As 8 de hoje estão todas ocupadas
+  (borda, 5 de glifos, data, borda). A alternativa — espremer o compromisso na
+  linha da data — foi descartada: a data já tem ~33 colunas centralizadas e as
+  duas coisas brigariam em terminal estreito.
+- **A linha mora no bloco do relógio, não na caixa do pomodoro.** Assim ela usa
+  toda a largura que sobra e comporta um título longo.
+- **Sem agenda ligada, a linha não existe** e o header volta a 8 linhas. Mesma
+  regra do pomodoro: recurso desligado não ocupa espaço.
+- **`now` entra por parâmetro** nas funções puras, como no pomodoro. É o que
+  permite testar "amanhã" e "quinta" sem depender de que dia é hoje.
+- **Evento com data ou hora malformada é pulado, não derruba o painel.** Os dois
+  campos vêm como string da saída do `gcalcli`.
+- **Abaixo de 5 minutos a linha muda de cor.** Uma contagem que você não percebe
+  não serve para nada, e 5 minutos é a janela em que ela precisa te interromper
+  antes do `P`.
+
+## Arquitetura
+
+### `src/data/agenda.rs` — a lógica, pura
+
+```rust
+/// O próximo evento que ainda não começou.
+///
+/// Ignora os de dia inteiro: eles não colidem com um bloco de foco. Item com
+/// data ou hora que não parseia é pulado — a saída vem de um CLI externo.
+pub fn next_upcoming<'a>(items: &'a [AgendaItem], now: DateTime<Local>) -> Option<&'a AgendaItem>;
+
+/// O "quando" do próximo compromisso, já em português.
+pub fn format_lead(item: &AgendaItem, now: DateTime<Local>) -> String;
+```
+
+`format_lead`, por distância:
+
+| Situação | Texto |
+|---|---|
+| menos de 1 minuto | `agora` |
+| menos de 1 hora, hoje | `em 12 min` |
+| mais de 1 hora, hoje | `14:00 (em 5h)` |
+| amanhã | `amanhã 09:00` |
+| de 2 a 7 dias | `quinta 14:00` |
+
+O nome do dia sai de `clock::weekday_short_ptbr`, que já existe.
+
+### `src/ui.rs` — a linha
+
+`render` passa o header de `Constraint::Length(8)` para 9 quando a agenda está
+ligada; `render_clock` ganha uma terceira faixa de 1 linha abaixo da data.
+
+Conteúdo, centralizado:
+
+```
+Próxima: em 12 min · 1:1 com o Milton [W]
+```
+
+O marcador de conta vem de `Account::marker()`, o mesmo `[W]`/`[P]` do painel de
+agenda. Estilo `muted`, e `accent` quando falta menos de 5 minutos.
+
+Sem próximo evento — agenda vazia, tudo no passado, ou a busca falhou — a linha
+fica em branco e a altura não muda. Layout que pula quando o dado chega é pior
+que uma linha vazia.
+
+Título longo é cortado com o `clip` que o arquivo já usa, pela largura da faixa.
+
+## Fluxo
+
+Nada de estado novo. A cada `ClockTick` o `app.now` já avança e o `render` refaz
+a linha a partir de `app.agenda.items`, que o refresh periódico mantém. A
+contagem anda sozinha, um segundo por vez.
+
+## Testes
+
+**`agenda.rs`:**
+
+- `next_upcoming` pula evento de dia inteiro;
+- pula evento que já começou e devolve o seguinte;
+- devolve `None` com a lista vazia e com tudo no passado;
+- pula item com data ou hora malformada em vez de entrar em pânico;
+- `format_lead` nos cinco formatos da tabela, com `now` fixo no teste.
+
+**`ui.rs`:**
+
+- o header mostra a linha quando há próximo evento;
+- com a agenda desligada no config o header volta a 8 linhas e a linha some;
+- terminal estreito corta o título sem estourar a largura.
