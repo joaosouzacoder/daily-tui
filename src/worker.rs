@@ -166,13 +166,18 @@ pub fn spawn(
                     },
                 ),
                 Ok(WorkerCmd::Notify(notice)) => {
-                    // Numa thread própria: nem o refresh de dados prende a
-                    // notificação atrás da fila (`refresh_all` roda cinco CLIs
-                    // bloqueantes em sequência), nem uma notificação prende o
-                    // refresh atrás dela (`notify_rust::show()` bloqueia num
-                    // round-trip de DBus, ~25s de timeout com o daemon travado).
-                    // As duas direções de bloqueio existiam pelo mesmo motivo:
-                    // um canal `mpsc` só, com um consumidor só.
+                    // Numa thread própria para o aviso não prender o refresh
+                    // atrás dele: `notify_rust::show()` bloqueia num round-trip
+                    // de DBus, e com o daemon travado são ~25s de timeout — que
+                    // seriam 25s sem e-mail, sem agenda e sem Jira.
+                    //
+                    // A direção contrária continua aberta: este braço só roda
+                    // depois de o worker desenfileirar o comando, então uma fase
+                    // que acaba no meio de um `refresh_all` (cinco CLIs
+                    // bloqueantes em sequência) espera o ciclo inteiro antes de
+                    // a thread nascer. O aviso chega atrasado, nunca duplicado
+                    // nem perdido. Fechar isso exige tirar o `Notify` desta
+                    // fila, e não só do caminho de envio.
                     let ui = ui.clone();
                     std::thread::spawn(move || {
                         let _ = ui.send(Msg::Notified(crate::notice::send(&notice)));
