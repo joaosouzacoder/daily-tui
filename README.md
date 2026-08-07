@@ -456,10 +456,6 @@ jira issues --filter both            # os dois filtros combinados
 jira mentions                        # issues onde fui mencionado nos últimos 30 dias
 ```
 
-> O modo `reporter` filtra por `statusCategory = 'In Progress'`, diferente dos
-> outros dois (`statusCategory != Done`): a versão simétrica devolvia mais de
-> 100 issues, quase todas ruído de um único projeto, contra 7 em andamento.
->
 > `mentions` é "onde fui mencionado nos últimos 30 dias" — **não** é
 > notificação não lida: o Jira não tem JQL para status de leitura.
 
@@ -662,12 +658,13 @@ estão no mapa; tipo fora dele aparece como `[?]` em vez de virar uma letra
 chutada pela inicial — `Subtarefa` ficaria igual a história.
 
 No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
-o filtro (`minhas` → `relator` → `ambas`) · `p` mostra as issues agrupadas por
-pai · `Esc` volta para a visão de issues. O rodapé mostra essas teclas sempre que
-o painel de Jira (ou o de Tarefas) está em foco. No filtro `ambas`, o que **não** é
-seu para fazer ganha `[rel]` em destaque: sem marcador significa "é sua". Marcar
-os três papéis deixava três grupos de colchetes esmaecidos na mesma linha e nada
-saltava — e `[R]` não serve para o papel, porque `[R]` já é o *tipo* requisição.
+o filtro (`ambas` → `minhas` → `relator`, e o painel abre em `ambas`) · `p`
+mostra as issues agrupadas por pai · `Esc` volta para a visão de issues. O
+rodapé mostra essas teclas sempre que o painel de Jira (ou o de Tarefas) está
+em foco. No filtro `ambas`, o que **não** é seu para fazer ganha `REL` em
+verde antes da chave: sem marcador significa "é sua", e o marcador some por
+completo assim que você também vira responsável — e `[R]` não serve para o
+papel, porque `[R]` já é o *tipo* requisição.
 
 ---
 

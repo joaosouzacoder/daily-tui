@@ -92,9 +92,9 @@ pub enum JiraRole {
 /// Modo de filtro do painel; circulado pela tecla `f`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JiraFilter {
-    #[default]
     Assignee,
     Reporter,
+    #[default]
     Both,
 }
 
