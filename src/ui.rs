@@ -15,6 +15,7 @@ use crate::clock;
 use chrono::{DateTime, Datelike, Local};
 use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
+use crate::data::agenda;
 use crate::data::{AgendaItem, TaskItem};
 
 /// Laranja do marcador `RES`: fora da paleta do tema porque o papel é uma
@@ -53,7 +54,7 @@ pub fn render(app: &App, frame: &mut Frame<'_>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8), // header (relógio grande + data)
+            Constraint::Length(header_height(app)), // relógio + data (+ compromisso)
             Constraint::Min(0),    // corpo
             Constraint::Length(1), // footer (ajuda)
         ])
@@ -110,6 +111,23 @@ fn render_header(app: &App, frame: &mut Frame<'_>, area: Rect) {
     }
 }
 
+/// Altura do header: borda + glifos + data + borda, mais a linha do próximo
+/// compromisso quando a agenda está ligada.
+///
+/// Agenda desligada não paga a linha — mesma regra da caixa do pomodoro.
+fn header_height(app: &App) -> u16 {
+    let base = clock::BIG_HEIGHT as u16 + 3;
+    if app.panels.contains(&Panel::Agenda) {
+        base + 1
+    } else {
+        base
+    }
+}
+
+/// Faltando isto ou menos para o compromisso, a linha sai do `muted` e chama
+/// atenção: é a janela em que ela precisa te alcançar antes de você apertar `P`.
+const APPOINTMENT_SOON: i64 = 5;
+
 fn render_clock(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let time = clock::format_time(&app.now);
@@ -119,12 +137,17 @@ fn render_clock(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let with_appointment = app.panels.contains(&Panel::Agenda);
+    let mut heights = vec![
+        Constraint::Length(clock::BIG_HEIGHT as u16),
+        Constraint::Length(1),
+    ];
+    if with_appointment {
+        heights.push(Constraint::Length(1));
+    }
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(clock::BIG_HEIGHT as u16),
-            Constraint::Length(1),
-        ])
+        .constraints(heights)
         .split(inner);
 
     // Relógio em "fonte" grande (arte ASCII), centralizado e em destaque.
@@ -138,6 +161,45 @@ fn render_clock(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(theme.muted(date))).alignment(Alignment::Center),
         rows[1],
+    );
+
+    if with_appointment {
+        render_next_appointment(app, frame, rows[2]);
+    }
+}
+
+/// A linha do próximo compromisso. Sem nenhum evento à frente ela fica em
+/// branco: esconder a linha faria o corpo inteiro pular quando o dado chegasse.
+fn render_next_appointment(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let theme = &app.theme;
+    let Some(item) = agenda::next_upcoming(&app.agenda.items, app.now) else {
+        return;
+    };
+
+    let lead = agenda::format_lead(item, app.now);
+    let marker = item.account.marker();
+    // O título é o único campo livre, então é ele que encolhe. Sem o `room_for`
+    // dos painéis de propósito: o piso de 12 colunas dele empurraria o marcador
+    // de conta para fora da faixa em terminal estreito, e aqui o "quando" e o
+    // marcador valem mais do que ver mais três letras do assunto.
+    let fixed = "Próxima:  · ".chars().count() + lead.chars().count() + marker.chars().count() + 1;
+    let room = (area.width as usize).saturating_sub(fixed);
+    let title = if room == 0 {
+        String::new()
+    } else {
+        clip(&item.title, room)
+    };
+
+    let soon = agenda::starts_in_minutes(item, app.now).is_some_and(|m| m <= APPOINTMENT_SOON);
+    let style = if soon { theme.accent } else { theme.muted };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("Próxima: {lead} · {title} {marker}"),
+            style,
+        )))
+        .alignment(Alignment::Center),
+        area,
     );
 }
 
@@ -229,11 +291,17 @@ fn render_pomodoro(app: &App, frame: &mut Frame<'_>, area: Rect) {
 /// Os pesos são as proporções de sempre (60/40 à esquerda, 40/30/30 à direita).
 /// Com painel desligado eles são normalizados sobre os que sobraram — é isso, e
 /// só isso, que faz o layout se redistribuir sozinho.
+/// Quantos dias o painel de agenda mostra, contando hoje. A busca continua em 7
+/// dias — é recorte de exibição, não janela de consulta.
+const AGENDA_PANEL_DAYS: i64 = 2;
+
 const LAYOUT: [(Panel, bool, u16); 5] = [
     (Panel::Email, true, 60),
     (Panel::Jira, true, 40),
-    (Panel::Agenda, false, 40),
-    (Panel::Pulls, false, 30),
+    // A agenda cede altura para os PRs: com dois dias na tela ela precisa de
+    // bem menos linhas do que quando mostrava a semana.
+    (Panel::Agenda, false, 25),
+    (Panel::Pulls, false, 45),
     (Panel::Tasks, false, 30),
 ];
 
@@ -372,10 +440,14 @@ fn render_emails(app: &App, frame: &mut Frame<'_>, area: Rect) {
 fn render_agenda(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let p = &app.agenda;
-    let title = format!(" AGENDA  {} ", p.items.len());
     let focused = app.focus == Panel::Agenda;
 
-    let lines = build_agenda_lines(&p.items, theme, area.width.saturating_sub(2) as usize);
+    // O painel mostra hoje e amanhã; a busca continua trazendo os 7 dias, que é
+    // o que a linha do próximo compromisso no header precisa para enxergar a
+    // segunda-feira numa sexta à noite.
+    let shown = agenda::within_days(&p.items, app.now, AGENDA_PANEL_DAYS);
+    let title = format!(" AGENDA  {} ", shown.len());
+    let lines = build_agenda_lines(&shown, theme, area.width.saturating_sub(2) as usize);
 
     let inner = panel_inner(frame, theme, area, title, focused);
     if render_empty_state(frame, app, inner, p) {
@@ -1240,17 +1312,21 @@ mod tests {
         app.emails.loaded = true;
         app.agenda.items = vec![AgendaItem {
             account: Account::Personal,
-            date: "2026-06-12".into(),
+            date: "2026-06-10".into(),
             time: String::new(),
             title: "Dia dos Namorados".into(),
         }];
         app.agenda.loaded = true;
+        // O painel mostra uma janela de dias a partir de `now`, então o evento
+        // precisa cair dentro dela. Antes da janela existir, qualquer data
+        // servia — e o teste passava por não haver filtro nenhum.
+        app.now = at_ten();
         app.pulls.items = vec!["#12 fix algo".into()];
         app.pulls.loaded = true;
 
         let out = render_to_string(&app, 120, 30);
         assert!(out.contains("Thiago"));
-        assert!(out.contains("12/06"));
+        assert!(out.contains("10/06"));
         assert!(out.contains("#12 fix algo"));
     }
 
@@ -1664,7 +1740,7 @@ mod tests {
         assert_eq!(left, vec![(Panel::Email, 60), (Panel::Jira, 40)]);
         assert_eq!(
             right,
-            vec![(Panel::Agenda, 40), (Panel::Pulls, 30), (Panel::Tasks, 30)]
+            vec![(Panel::Agenda, 25), (Panel::Pulls, 45), (Panel::Tasks, 30)]
         );
     }
 
@@ -1672,7 +1748,7 @@ mod tests {
     fn a_column_left_empty_is_not_reserved() {
         let (left, right) = columns(&[Panel::Agenda, Panel::Tasks]);
         assert!(left.is_empty(), "nada na esquerda");
-        assert_eq!(right, vec![(Panel::Agenda, 40), (Panel::Tasks, 30)]);
+        assert_eq!(right, vec![(Panel::Agenda, 25), (Panel::Tasks, 30)]);
     }
 
     #[test]
@@ -1988,6 +2064,77 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Quarta, 2026-06-10, 10:00 — o mesmo instante fixo dos testes de agenda.
+    fn at_ten() -> chrono::DateTime<Local> {
+        use chrono::TimeZone;
+        Local.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap()
+    }
+
+    fn app_with_appointment(title: &str) -> App {
+        let mut app = test_app();
+        app.now = at_ten();
+        app.agenda.items = vec![AgendaItem {
+            account: Account::Work,
+            date: "2026-06-10".into(),
+            time: "10:12".into(),
+            title: title.into(),
+        }];
+        app
+    }
+
+    #[test]
+    fn the_header_shows_the_next_appointment() {
+        let app = app_with_appointment("1:1 com o Milton");
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("Próxima:"), "{out}");
+        assert!(out.contains("em 12 min"), "{out}");
+        assert!(out.contains("1:1 com o Milton"), "{out}");
+    }
+
+    #[test]
+    fn with_nothing_ahead_the_line_is_blank_but_the_header_keeps_its_height() {
+        // Esconder a linha faria o corpo inteiro pular quando o dado chegasse.
+        let mut app = app_with_appointment("passou");
+        app.agenda.items[0].time = "09:00".into();
+        assert_eq!(header_height(&app), 9);
+        let out = render_to_string(&app, 100, 30);
+        assert!(!out.contains("Próxima:"), "{out}");
+    }
+
+    #[test]
+    fn without_the_agenda_panel_the_header_gives_the_line_back() {
+        let with = test_app();
+        assert_eq!(header_height(&with), 9);
+
+        let mut without = app_with_appointment("1:1 com o Milton");
+        without.panels.retain(|p| *p != Panel::Agenda);
+        assert_eq!(header_height(&without), 8);
+        let out = render_to_string(&without, 100, 30);
+        assert!(!out.contains("Próxima:"), "{out}");
+    }
+
+    /// A linha do compromisso no header: borda, 5 de glifos, data, e ela.
+    fn appointment_line(out: &str) -> String {
+        out.lines().nth(clock::BIG_HEIGHT + 2).unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn a_long_title_is_clipped_so_the_marker_after_it_survives() {
+        // O widget já trunca sozinho o que passa da largura — então "o fim do
+        // título sumiu" não prova nada sobre o nosso `clip`. O que só o nosso
+        // corte garante é o que vem DEPOIS do título: o marcador de conta. Sem
+        // cortar, o truncamento do widget levaria o `[W]` junto.
+        //
+        // E a asserção é na LINHA do header, não na tela: o painel de agenda
+        // desenha `[W]` também, e olhar a tela inteira encontraria o dele.
+        let app = app_with_appointment(
+            "revisão de arquitetura do agregador com o time inteiro e mais gente",
+        );
+        let line = appointment_line(&render_to_string(&app, 60, 30));
+        assert!(line.contains("em 12 min"), "o quando sobrevive: {line:?}");
+        assert!(line.contains("[W]"), "o marcador sobrevive ao corte: {line:?}");
     }
 
     #[test]

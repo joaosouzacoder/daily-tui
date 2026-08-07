@@ -43,6 +43,16 @@ evento com hora marcada dentro dos 7 dias que o `gcalcli` traz.
 - **Abaixo de 5 minutos a linha muda de cor.** Uma contagem que você não percebe
   não serve para nada, e 5 minutos é a janela em que ela precisa te interromper
   antes do `P`.
+- **O painel de agenda passa a mostrar 2 dias; a busca continua em 7.** Pedido
+  durante a implementação. São recortes diferentes do mesmo dado: o painel cabe
+  em menos altura, e a linha do header continua enxergando a segunda-feira
+  quando você olha numa sexta à noite. Cortar a *busca* teria apagado justamente
+  o caso que motivou a decisão de "vai para o próximo dia".
+- **A altura que a agenda liberou foi para os PRs** (`Agenda 40→25`,
+  `Pulls 30→45`), também a pedido.
+- **A linha do header não usa o `room_for` dos painéis.** O piso de 12 colunas
+  dele empurra o marcador de conta para fora em terminal estreito. Aqui o
+  "quando" e o marcador valem mais que três letras a mais do assunto.
 
 ## Arquitetura
 
@@ -110,5 +120,15 @@ contagem anda sozinha, um segundo por vez.
 **`ui.rs`:**
 
 - o header mostra a linha quando há próximo evento;
+- sem nada à frente a linha fica em branco e a altura não muda;
 - com a agenda desligada no config o header volta a 8 linhas e a linha some;
-- terminal estreito corta o título sem estourar a largura.
+- título longo é cortado **e o marcador de conta sobrevive** — o widget já
+  trunca sozinho o que passa da largura, então "o fim do título sumiu" não prova
+  nada sobre o nosso corte; o que só ele garante é o que vem depois do título. A
+  asserção olha a linha do header, não a tela: o painel de agenda também desenha
+  `[W]`, e olhar a tela inteira encontraria o dele.
+
+### O que não é coberto por teste
+
+A cor da linha abaixo de 5 minutos. O harness de render compara símbolos, não
+estilo, e não há como afirmar pelo buffer que a linha ficou em destaque.

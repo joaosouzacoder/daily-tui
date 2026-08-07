@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use chrono::{Duration, Local};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime};
 
 use super::Account;
 
@@ -25,6 +25,88 @@ impl AgendaItem {
     pub fn all_day(&self) -> bool {
         self.time.trim().is_empty()
     }
+}
+
+/// Junta data e hora do item num instante local.
+///
+/// Devolve `None` para evento de dia inteiro (sem hora) e para qualquer coisa
+/// que não parseie: as duas colunas vêm como texto da saída do `gcalcli`, e um
+/// campo torto não pode derrubar o header.
+fn starts_at(item: &AgendaItem) -> Option<DateTime<Local>> {
+    let date = NaiveDate::parse_from_str(item.date.trim(), "%Y-%m-%d").ok()?;
+    let time = NaiveTime::parse_from_str(item.time.trim(), "%H:%M").ok()?;
+    date.and_time(time).and_local_timezone(Local).single()
+}
+
+/// O próximo evento que ainda não começou.
+///
+/// Ignora os de dia inteiro: eles não colidem com um bloco de foco, e não teriam
+/// contagem regressiva. Não assume que a lista está ordenada — ela está, mas
+/// depender disso deixaria o resultado dependendo de quem chamou `sort` antes.
+pub fn next_upcoming(items: &[AgendaItem], now: DateTime<Local>) -> Option<&AgendaItem> {
+    items
+        .iter()
+        .filter_map(|item| starts_at(item).map(|at| (at, item)))
+        .filter(|(at, _)| *at > now)
+        .min_by_key(|(at, _)| *at)
+        .map(|(_, item)| item)
+}
+
+/// Os eventos que caem nos próximos `days` dias, contando hoje como o primeiro.
+///
+/// A busca traz 7 dias e continua trazendo: a linha do próximo compromisso no
+/// header precisa enxergar até a segunda-feira quando você olha numa sexta à
+/// noite. O painel mostra menos que isso porque cabe em menos altura — são
+/// recortes diferentes do mesmo dado, não uma busca menor.
+pub fn within_days(items: &[AgendaItem], now: DateTime<Local>, days: i64) -> Vec<AgendaItem> {
+    let today = now.date_naive();
+    let last = today + Duration::days(days - 1);
+    items
+        .iter()
+        .filter(|item| {
+            match NaiveDate::parse_from_str(item.date.trim(), "%Y-%m-%d") {
+                Ok(d) => d >= today && d <= last,
+                // Data que não parseia fica na lista. Este filtro existe para
+                // encurtar a janela, não para virar um lugar onde evento some
+                // em silêncio — quem tem data torta aparece e se explica.
+                Err(_) => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Quantos minutos faltam para o evento começar. `None` para dia inteiro ou
+/// campo malformado. Existe para a tela decidir quando destacar a linha sem
+/// precisar interpretar o texto que o `format_lead` devolve.
+pub fn starts_in_minutes(item: &AgendaItem, now: DateTime<Local>) -> Option<i64> {
+    starts_at(item).map(|at| (at - now).num_minutes())
+}
+
+/// O "quando" do próximo compromisso: `agora`, `em 12 min`, `15:00 (em 5h)`,
+/// `amanhã 09:00`, `Sexta 14:00`.
+pub fn format_lead(item: &AgendaItem, now: DateTime<Local>) -> String {
+    let Some(at) = starts_at(item) else {
+        return String::new();
+    };
+    let days = (at.date_naive() - now.date_naive()).num_days();
+    let time = at.format("%H:%M").to_string();
+    if days >= 2 {
+        return format!("{} {time}", crate::clock::weekday_short_ptbr(at.weekday()));
+    }
+    if days == 1 {
+        return format!("amanhã {time}");
+    }
+
+    let minutes = (at - now).num_minutes();
+    if minutes < 1 {
+        // "em 0 min" leria como "não tem nada marcado", que é o oposto.
+        return "agora".to_string();
+    }
+    if minutes < 60 {
+        return format!("em {minutes} min");
+    }
+    format!("{time} (em {}h)", minutes / 60)
 }
 
 /// Faz o parse da saída de `gcalcli agenda --tsv`.
@@ -205,5 +287,105 @@ mod tests {
     fn empty_input_yields_no_items() {
         assert_eq!(parse_agenda_tsv("", Account::Work).len(), 0);
         assert_eq!(parse_agenda_tsv("start_date\tstart_time\tend_date\tend_time\ttitle\n", Account::Work).len(), 0);
+    }
+
+    // --- próximo compromisso ---
+
+    /// Quarta-feira, 2026-06-10, 10:00. Fixo para "amanhã" e "quinta" não
+    /// dependerem de que dia é hoje.
+    fn now() -> chrono::DateTime<Local> {
+        use chrono::TimeZone;
+        Local.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap()
+    }
+
+    fn at(date: &str, time: &str, title: &str) -> AgendaItem {
+        AgendaItem {
+            account: Account::Work,
+            date: date.into(),
+            time: time.into(),
+            title: title.into(),
+        }
+    }
+
+    #[test]
+    fn the_next_one_is_the_first_that_has_not_started() {
+        let items = vec![
+            at("2026-06-10", "09:00", "já passou"),
+            at("2026-06-10", "11:00", "essa"),
+            at("2026-06-10", "15:00", "depois"),
+        ];
+        assert_eq!(next_upcoming(&items, now()).unwrap().title, "essa");
+    }
+
+    #[test]
+    fn an_all_day_event_is_not_the_next_appointment() {
+        // Sem hora, ele não colide com um bloco de foco — e não teria contagem.
+        //
+        // O dia inteiro é o de AMANHÃ de propósito. Com um de hoje, tratar a
+        // hora vazia como meia-noite ainda cairia no passado e o filtro de
+        // "já começou" esconderia o defeito: o teste passaria sem a exclusão.
+        // Amanhã à meia-noite é futuro, e só a exclusão o mantém fora.
+        let items = vec![
+            at("2026-06-11", "", "feriado"),
+            at("2026-06-11", "09:00", "essa"),
+        ];
+        assert_eq!(next_upcoming(&items, now()).unwrap().title, "essa");
+    }
+
+    #[test]
+    fn nothing_ahead_means_nothing_to_show() {
+        assert!(next_upcoming(&[], now()).is_none());
+        let past = vec![at("2026-06-10", "09:00", "já passou"), at("2026-06-09", "23:00", "ontem")];
+        assert!(next_upcoming(&past, now()).is_none());
+    }
+
+    #[test]
+    fn a_malformed_date_or_time_is_skipped_instead_of_panicking() {
+        // As duas colunas vêm como texto de um CLI externo.
+        let items = vec![
+            at("nao-e-data", "11:00", "lixo"),
+            at("2026-06-10", "25:99", "hora impossível"),
+            at("2026-06-10", "11:00", "essa"),
+        ];
+        assert_eq!(next_upcoming(&items, now()).unwrap().title, "essa");
+    }
+
+    #[test]
+    fn the_lead_says_how_far_away_the_appointment_is() {
+        assert_eq!(format_lead(&at("2026-06-10", "10:00", ""), now()), "agora");
+        assert_eq!(format_lead(&at("2026-06-10", "10:12", ""), now()), "em 12 min");
+        assert_eq!(format_lead(&at("2026-06-10", "15:00", ""), now()), "15:00 (em 5h)");
+        assert_eq!(format_lead(&at("2026-06-11", "09:00", ""), now()), "amanhã 09:00");
+        assert_eq!(format_lead(&at("2026-06-11", "23:30", ""), now()), "amanhã 23:30");
+        // 2026-06-11 é quinta; 12 é sexta.
+        assert_eq!(format_lead(&at("2026-06-12", "14:00", ""), now()), "Sexta 14:00");
+    }
+
+    #[test]
+    fn the_panel_window_keeps_today_and_tomorrow_and_drops_the_rest() {
+        let items = vec![
+            at("2026-06-09", "09:00", "ontem"),
+            at("2026-06-10", "11:00", "hoje"),
+            at("2026-06-11", "09:00", "amanhã"),
+            at("2026-06-12", "09:00", "depois de amanhã"),
+        ];
+        let window = within_days(&items, now(), 2);
+        let kept: Vec<&str> = window.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(kept, vec!["hoje", "amanhã"]);
+    }
+
+    #[test]
+    fn the_panel_window_does_not_hide_an_event_with_a_broken_date() {
+        // Encurtar a janela não pode virar um lugar onde evento some calado.
+        let items = vec![at("nao-e-data", "09:00", "torto")];
+        assert_eq!(within_days(&items, now(), 2).len(), 1);
+    }
+
+    #[test]
+    fn an_appointment_less_than_a_minute_away_reads_as_now() {
+        // "em 0 min" seria pior que inútil: parece que não há nada marcado.
+        let items = vec![at("2026-06-10", "10:00", "começando")];
+        let next = next_upcoming(&items, now() - chrono::Duration::seconds(30)).unwrap();
+        assert_eq!(format_lead(next, now() - chrono::Duration::seconds(30)), "agora");
     }
 }
