@@ -194,7 +194,12 @@ pub fn spawn(
 /// Busca os conjuntos de dados e manda cada resultado assim que fica pronto.
 /// Menções só entram no refresh se `mentions_loaded` — não vale pagar a
 /// consulta para quem nunca abriu a visão.
+///
+/// O par `RefreshStarted`/`RefreshDone` que acende o indicador do footer mora
+/// aqui dentro, e não nos dois lugares que chamam esta função: assim um terceiro
+/// chamador não tem como esquecer o fechamento e deixar o indicador girando.
 fn refresh_all(ui: &ProgramHandle<Msg>, jira_filter: JiraFilter, mentions_loaded: bool) {
+    let _ = ui.send(Msg::RefreshStarted);
     // Painel desligado não é buscado: é o que transforma "não uso tarefas" em
     // "não preciso autenticar a Microsoft".
     let on = crate::config::get().panels;
@@ -216,6 +221,9 @@ fn refresh_all(ui: &ProgramHandle<Msg>, jira_filter: JiraFilter, mentions_loaded
     if on.tasks {
         let _ = ui.send(Msg::TasksLoaded(tasks::fetch()));
     }
+    // Fecha o par mesmo que uma busca acima tenha voltado com erro: o erro vai
+    // para o painel dele, e o footer para de anunciar trabalho que acabou.
+    let _ = ui.send(Msg::RefreshDone);
 }
 
 /// Aplica uma escrita no Microsoft To Do e re-busca a lista. Se a escrita falhar,

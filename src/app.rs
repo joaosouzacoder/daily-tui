@@ -453,6 +453,9 @@ pub struct App {
     pub pomodoro_enabled: bool,
     /// Por que o último aviso não saiu, mostrado na caixa do pomodoro.
     pub notify_error: Option<String>,
+    /// Refresh completo em andamento, mostrado no footer. Só o par
+    /// `RefreshStarted`/`RefreshDone` do worker escreve aqui.
+    pub refreshing: bool,
     cmd_tx: Sender<WorkerCmd>,
 }
 
@@ -501,6 +504,7 @@ impl App {
             },
             pomodoro_enabled: config::get().pomodoro.enabled,
             notify_error: None,
+            refreshing: false,
             cmd_tx,
         }
     }
@@ -1452,6 +1456,8 @@ impl Model for App {
             // chamador do canal genérico vai precisar de rota própria aqui —
             // esta linha sozinha não distingue de quem veio o aviso.
             Msg::Notified(res) => self.notify_error = res.err(),
+            Msg::RefreshStarted => self.refreshing = true,
+            Msg::RefreshDone => self.refreshing = false,
         }
         Cmd::none()
     }
@@ -2926,5 +2932,28 @@ mod tests {
         app.notify_error = Some("velho".into());
         app.update(Msg::Notified(Ok(())));
         assert!(app.notify_error.is_none());
+    }
+
+    #[test]
+    fn the_refresh_flag_follows_the_workers_bracket() {
+        let mut app = test_app();
+        assert!(!app.refreshing, "parado no arranque");
+        app.update(Msg::RefreshStarted);
+        assert!(app.refreshing);
+        app.update(Msg::RefreshDone);
+        assert!(!app.refreshing);
+    }
+
+    #[test]
+    fn a_panel_that_failed_does_not_leave_the_indicator_stuck() {
+        // É por isso que o par de mensagens existe. Deduzir "acabou" de "todos os
+        // painéis responderam" deixaria o spinner girando para sempre quando um
+        // painel volta com erro — e é justamente aí que você olha para o footer.
+        let mut app = test_app();
+        app.update(Msg::RefreshStarted);
+        app.update(Msg::EmailsLoaded(Err("himalaya travou".into())));
+        assert!(app.refreshing, "erro de painel não encerra o refresh");
+        app.update(Msg::RefreshDone);
+        assert!(!app.refreshing);
     }
 }

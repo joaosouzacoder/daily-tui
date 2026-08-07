@@ -49,9 +49,11 @@ RefreshDone,
 
 ### Worker
 
-Em `src/worker.rs`, os dois pontos onde `refresh_all` é chamado — o do arranque e
-o do laço — passam a mandar `RefreshStarted` antes e `RefreshDone` depois.
-`refresh_folders`, que vem em seguida, fica de fora do par.
+O par mora **dentro** de `refresh_all`, não nos dois lugares que a chamam (o
+arranque e o laço). Foi mudado durante a implementação: cercar nos call sites
+duplicaria as duas linhas e deixaria um terceiro chamador futuro livre para
+esquecer o fechamento. `refresh_folders`, que roda em seguida, fica de fora do
+par — quando ela começa, todo resultado de painel já foi enviado.
 
 ### App
 
@@ -93,4 +95,14 @@ passe da coluna é cortado em silêncio pelo widget, e a palavra ficaria truncad
 - `RefreshDone` desliga **mesmo depois de um painel ter voltado com erro** — é a
   regressão do spinner preso, e o motivo de o par existir.
 - O footer mostra `recarregando` durante o refresh e a hora fora dele.
-- O texto de recarregando cabe nas 22 colunas da coluna do status.
+- O texto de recarregando cabe nas 22 colunas da coluna do status, em todo quadro
+  do spinner — e o teste também exige a palavra, senão ele mediria a largura do
+  texto errado e ficaria verde com o ramo de "recarregando" apagado.
+
+### O que não é coberto por teste
+
+O envio do par pelo próprio `refresh_all`. Testá-lo exigiria chamar a função, que
+busca de verdade nos CLIs de cada painel ligado — e os painéis vêm do config, que
+é um `OnceLock` que teste nenhum consegue virar. Os testes cobrem o que o App faz
+ao receber cada mensagem; que o worker as manda é verificado à mão, abrindo o
+painel e olhando o indicador no arranque.

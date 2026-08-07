@@ -12,7 +12,7 @@ use ratatui_bubbletea_theme::BubbleTheme;
 use crate::ansi;
 use crate::app::{App, InputKind, Panel, Prompt, TaskField, TaskForm};
 use crate::clock;
-use chrono::Datelike;
+use chrono::{DateTime, Datelike, Local};
 use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
 use crate::data::{AgendaItem, TaskItem};
@@ -1017,11 +1017,28 @@ fn panel_hints(focus: Panel) -> &'static str {
     }
 }
 
+/// Largura da coluna de status do footer (o `⟳ HH:MM:SS` à direita).
+const FOOTER_STATUS_WIDTH: u16 = 22;
+
+/// Texto da coluna de status do footer.
+///
+/// Puro para a largura poder ser fixada em teste: texto que passa da coluna é
+/// cortado em silêncio pelo widget, e sobraria a palavra truncada na tela.
+fn status_text(refreshing: bool, frame: &str, last_refresh: Option<DateTime<Local>>) -> String {
+    if refreshing {
+        return format!("{frame} recarregando");
+    }
+    match last_refresh {
+        Some(t) => format!("⟳ {}", clock::format_time(&t)),
+        None => "⟳ …".to_string(),
+    }
+}
+
 fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let theme = &app.theme;
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(22)])
+        .constraints([Constraint::Min(0), Constraint::Length(FOOTER_STATUS_WIDTH)])
         .split(area);
 
     let help = if app.detail.is_some() {
@@ -1048,11 +1065,17 @@ fn render_footer(app: &App, frame: &mut Frame<'_>, area: Rect) {
     };
     frame.render_widget(Paragraph::new(help), cols[0]);
 
-    let status = match app.last_refresh {
-        Some(t) => Line::from(theme.muted(format!("⟳ {}", clock::format_time(&t)))),
-        None => Line::from(theme.muted("⟳ …")),
-    };
-    frame.render_widget(Paragraph::new(status).alignment(Alignment::Right), cols[1]);
+    // O mesmo spinner do painel vazio, para a tela não ter duas animações
+    // discordando sobre o que significa "trabalhando".
+    let status = status_text(
+        app.refreshing,
+        app.spinner.current_frame(),
+        app.last_refresh,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(theme.muted(status))).alignment(Alignment::Right),
+        cols[1],
+    );
 }
 
 fn render_detail(app: &App, frame: &mut Frame<'_>, area: Rect) {
@@ -1162,6 +1185,7 @@ mod tests {
     use ratatui_tea::Model;
     use std::sync::mpsc;
     use crate::pomodoro::{Phase, Pomodoro};
+    use ratatui_bubbletea_components::SpinnerFrames;
     use std::time::{Duration, Instant};
 
     fn test_app() -> App {
@@ -1945,6 +1969,46 @@ mod tests {
                     "fase {label:?} com {done} focos: {count:?} não cabe em {inner_width}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_footer_says_it_is_reloading_while_the_refresh_runs() {
+        let mut app = test_app();
+        let out = render_to_string(&app, 100, 30);
+        assert!(!out.contains("recarregando"), "parado, não anuncia nada: {out}");
+
+        app.update(Msg::RefreshStarted);
+        let out = render_to_string(&app, 100, 30);
+        assert!(out.contains("recarregando"), "{out}");
+    }
+
+    #[test]
+    fn the_footer_goes_back_to_the_last_refresh_time_when_it_finishes() {
+        let mut app = test_app();
+        app.update(Msg::RefreshStarted);
+        // `EmailsLoaded` é o que preenche `last_refresh`.
+        app.update(Msg::EmailsLoaded(Ok(vec![])));
+        app.update(Msg::RefreshDone);
+
+        let out = render_to_string(&app, 100, 30);
+        assert!(!out.contains("recarregando"), "{out}");
+        assert!(out.contains('⟳'), "a hora volta: {out}");
+    }
+
+    #[test]
+    fn every_spinner_frame_keeps_the_reloading_status_inside_its_column() {
+        // Texto que passa da coluna é cortado em silêncio pelo widget, e o que
+        // sobraria na tela seria a palavra truncada.
+        for frame in SpinnerFrames::DOTS.frames() {
+            let text = status_text(true, frame, None);
+            // Sem esta asserção o teste mediria a largura do texto errado e
+            // continuaria verde se o ramo de "recarregando" desaparecesse.
+            assert!(text.contains("recarregando"), "quadro {frame:?}: {text:?}");
+            assert!(
+                text.chars().count() <= FOOTER_STATUS_WIDTH as usize,
+                "quadro {frame:?}: {text:?} passa de {FOOTER_STATUS_WIDTH}"
+            );
         }
     }
 }

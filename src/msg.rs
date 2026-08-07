@@ -64,4 +64,16 @@ pub enum Msg {
     /// Fim de um envio de notificação. Só interessa quando falha: achar que
     /// vai ser avisado e não ser é o pior defeito possível aqui.
     Notified(Result<(), String>),
+    /// O worker começou um refresh completo.
+    ///
+    /// Vem dele porque o refresh periódico nasce do timeout do próprio
+    /// `recv_timeout`: nada fora do worker sabe que ele começou.
+    RefreshStarted,
+    /// O worker terminou o refresh completo — todos os resultados de painel já
+    /// foram enviados.
+    ///
+    /// Existe em par com o `RefreshStarted` em vez de o App deduzir o fim de
+    /// "todos os painéis responderam": painel que falha não responde, e a
+    /// dedução deixaria o indicador girando para sempre.
+    RefreshDone,
 }
