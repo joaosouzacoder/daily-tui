@@ -190,8 +190,17 @@ fn render_next_appointment(app: &App, frame: &mut Frame<'_>, area: Rect) {
         clip(&item.title, room)
     };
 
+    // Hierarquia do header: o relógio é `accent` em negrito, a data é `muted`,
+    // e o compromisso fica entre os dois. Ele estava em `muted` junto com a
+    // data, e informação sobre a qual você age não pode ser tão apagada quanto
+    // o dia da semana. `warning` e não `error` no aperto: reunião chegando é
+    // aviso, não defeito — e deixa o vermelho significando só "quebrou".
     let soon = agenda::starts_in_minutes(item, app.now).is_some_and(|m| m <= APPOINTMENT_SOON);
-    let style = if soon { theme.accent } else { theme.muted };
+    let style = if soon {
+        theme.warning.add_modifier(Modifier::BOLD)
+    } else {
+        theme.text
+    };
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(

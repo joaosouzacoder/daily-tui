@@ -93,7 +93,16 @@ Próxima: em 12 min · 1:1 com o Milton [W]
 ```
 
 O marcador de conta vem de `Account::marker()`, o mesmo `[W]`/`[P]` do painel de
-agenda. Estilo `muted`, e `accent` quando falta menos de 5 minutos.
+agenda.
+
+A linha nasceu em `muted` e foi promovida a `text` a pedido: `muted` é a cor da
+data, e informação sobre a qual você age não pode ser tão apagada quanto o dia da
+semana. A hierarquia do header fica em três níveis — relógio em `accent` negrito,
+compromisso em `text`, data em `muted`.
+
+Faltando 5 minutos ou menos, a linha vai para `warning` em negrito. `warning` e
+não `error`: reunião chegando é aviso, não defeito, e assim o vermelho continua
+significando só "quebrou" no resto do painel.
 
 Sem próximo evento — agenda vazia, tudo no passado, ou a busca falhou — a linha
 fica em branco e a altura não muda. Layout que pula quando o dado chega é pior
