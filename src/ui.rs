@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui_bubbletea_theme::BubbleTheme;
@@ -14,6 +14,11 @@ use chrono::Datelike;
 use crate::data::jira::{self, JiraItem};
 use crate::data::tasks::{self, SubTask};
 use crate::data::{AgendaItem, TaskItem};
+
+/// Laranja do marcador `RES`: fora da paleta do tema porque o papel é uma
+/// categoria própria — não é sucesso, aviso nem erro, e reusar uma dessas cores
+/// faria a linha parecer que está dizendo algo sobre o estado da issue.
+const ROLE_ASSIGNEE: Color = Color::Rgb(0xFF, 0x99, 0x1F);
 
 /// Largura que sobra para o campo flexível de uma linha.
 ///
@@ -349,12 +354,16 @@ fn issue_line(
     // dia ou uma iniciativa acima dela, e lido em coluna se compara de relance.
     let kind = item.type_marker();
     let mut spans = vec![theme.muted(format!("{indent}{kind} "))];
-    // No filtro `ambas`, marca só o que **não** é seu para fazer: sem marcador
-    // significa "é sua". `REL` vem antes da chave, em verde — a mesma marca do
-    // `jirapending`, e não `[rel]`: some por completo quando você também é
-    // responsável, em vez de disputar espaço com o tipo e o status entre colchetes.
-    let role = if show_role && item.role == jira::JiraRole::Reporter {
-        spans.push(theme.success("REL "));
+    // No filtro `ambas`, cada linha declara o papel antes da chave: `REL` verde
+    // quando você só relatou, `RES` laranja quando a issue é sua para fazer.
+    // Marcar os dois lados evita ler ausência de marca como significado — ambos
+    // ocupam 4 colunas, então a chave continua alinhada linha a linha.
+    let role = if show_role {
+        if item.role == jira::JiraRole::Reporter {
+            spans.push(theme.success("REL "));
+        } else {
+            spans.push(Span::styled("RES ", Style::default().fg(ROLE_ASSIGNEE)));
+        }
         4
     } else {
         0
@@ -1184,15 +1193,17 @@ mod tests {
         .unwrap();
         app.jira.loaded = true;
         let out = render_to_string(&app, 120, 30);
-        assert!(out.contains("[S] ENG-101"), "história marcada com [S]");
-        assert!(out.contains("[I] ENG-1"), "iniciativa marcada com [I]");
+        // O papel entra entre o tipo e a chave no filtro `ambas` — sem papel no
+        // JSON, a issue conta como sua e leva `RES`.
+        assert!(out.contains("[S] RES ENG-101"), "história marcada com [S]");
+        assert!(out.contains("[I] RES ENG-1"), "iniciativa marcada com [I]");
     }
 
     #[test]
-    fn in_the_both_filter_only_what_is_not_yours_is_marked() {
+    fn in_the_both_filter_every_line_declares_its_role() {
         // A queixa era "nada me difere o que é meu do que eu só relatei".
-        // Marcar os dois lados dava três grupos de colchetes esmaecidos na
-        // mesma linha; agora sem marca significa "é sua".
+        // Ausência de marca era ambígua demais: agora cada linha diz o papel,
+        // `REL` para o que você só relatou e `RES` para o que é seu para fazer.
         let mut app = test_app();
         app.jira.items = crate::data::jira::parse_issues(
             r#"[{"key":"ENG-1","summary":"minha","status":"Em andamento","project":"ENG",
@@ -1213,9 +1224,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("falta a linha de {needle}"))
                 .to_string()
         };
-        assert!(line("ENG-2").contains("REL "), "só relator é marcado");
-        assert!(!line("ENG-1").contains("REL "), "a sua não leva marca");
-        assert!(!line("ENG-3").contains("REL "), "nem a que é sua e você relatou");
+        assert!(line("ENG-2").contains("REL ENG-2"), "só relator leva REL");
+        assert!(line("ENG-1").contains("RES ENG-1"), "a sua leva RES");
+        assert!(
+            line("ENG-3").contains("RES ENG-3"),
+            "e a que é sua e você relatou também: o que importa é ser responsável"
+        );
+        assert!(!line("ENG-1").contains("REL "), "sem REL no que é seu");
+        assert!(!line("ENG-3").contains("REL "), "nem no papel duplo");
     }
 
     #[test]
@@ -1250,7 +1266,9 @@ mod tests {
         app.jira.loaded = true;
         app.jira_filter = crate::data::jira::JiraFilter::Assignee;
         // Filtro `minhas`: toda issue tem o mesmo papel, e a marca seria ruído.
-        assert!(!render_to_string(&app, 120, 30).contains("REL "));
+        let out = render_to_string(&app, 120, 30);
+        assert!(!out.contains("REL "));
+        assert!(!out.contains("RES "));
     }
 
     #[test]
@@ -1272,7 +1290,7 @@ mod tests {
             let inner = line.trim_start_matches(['│', ' ']);
             line.find(inner).unwrap_or(0)
         };
-        assert!(out.contains("[s] ENG-9"), "subtarefa tem marcador próprio");
+        assert!(out.contains("[s] RES ENG-9"), "subtarefa tem marcador próprio");
         assert!(
             indent_of("ENG-9") > indent_of("ENG-7"),
             "e entra deslocada em relação ao pai"
