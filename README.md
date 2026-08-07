@@ -661,10 +661,11 @@ No painel **Jira**: `Enter` abre a issue selecionada no navegador · `f` circula
 o filtro (`ambas` → `minhas` → `relator`, e o painel abre em `ambas`) · `p`
 mostra as issues agrupadas por pai · `Esc` volta para a visão de issues. O
 rodapé mostra essas teclas sempre que o painel de Jira (ou o de Tarefas) está
-em foco. No filtro `ambas`, o que **não** é seu para fazer ganha `REL` em
-verde antes da chave: sem marcador significa "é sua", e o marcador some por
-completo assim que você também vira responsável — e `[R]` não serve para o
-papel, porque `[R]` já é o *tipo* requisição.
+em foco. No filtro `ambas`, cada linha declara o papel antes da chave: `REL`
+em verde quando você só relatou, `RES` em laranja (`#FF991F`) quando a issue é
+sua para fazer — inclusive quando você é relator **e** responsável. Nos outros
+filtros o marcador some, porque ali todas as issues têm o mesmo papel. E `[R]`
+não serve para o papel, porque `[R]` já é o *tipo* requisição.
 
 ---
 
